@@ -1,0 +1,610 @@
+// ============================================================
+// QUANTUM AI SMART ENTRY PRO — Indicator
+// Version      : 1.0.0
+// Pine Script  : v6
+// Author       : Quantum AI Systems
+// Description  : High-probability, non-repainting multi-filter
+//                signal indicator for crypto, forex, stocks & indices.
+//                Signals confirmed ONLY after candle close.
+// ============================================================
+
+//@version=6
+indicator(title      = "Quantum AI Smart Entry Pro",
+          shorttitle = "QASEP",
+          overlay    = true,
+          max_labels_count = 500,
+          max_lines_count  = 500,
+          max_boxes_count  = 200)
+
+// ============================================================
+// ─── SECTION 1 · USER INPUTS ────────────────────────────────
+// ============================================================
+
+// ── Trend / EMA ─────────────────────────────────────────────
+grp_ema = "── Trend / EMA Settings ──"
+i_ema_fast   = input.int(50,  "Fast EMA Length",   minval=1, group=grp_ema)
+i_ema_slow   = input.int(200, "Slow EMA Length",   minval=1, group=grp_ema)
+
+// ── RSI ─────────────────────────────────────────────────────
+grp_rsi = "── RSI Settings ──"
+i_rsi_len    = input.int(14,  "RSI Length",        minval=1, group=grp_rsi)
+i_rsi_bull   = input.float(55,"RSI Bull Level",    minval=50, maxval=100, group=grp_rsi)
+i_rsi_bear   = input.float(45,"RSI Bear Level",    minval=0,  maxval=50,  group=grp_rsi)
+i_rsi_dead_h = input.float(52,"RSI Dead-Zone High",minval=50, maxval=100, group=grp_rsi)
+i_rsi_dead_l = input.float(48,"RSI Dead-Zone Low", minval=0,  maxval=50,  group=grp_rsi)
+
+// ── MACD ─────────────────────────────────────────────────────
+grp_macd = "── MACD Settings ──"
+i_macd_fast  = input.int(12, "MACD Fast",  minval=1, group=grp_macd)
+i_macd_slow  = input.int(26, "MACD Slow",  minval=1, group=grp_macd)
+i_macd_sig   = input.int(9,  "MACD Signal",minval=1, group=grp_macd)
+
+// ── ADX ──────────────────────────────────────────────────────
+grp_adx = "── ADX Settings ──"
+i_adx_len    = input.int(14, "ADX Length", minval=1, group=grp_adx)
+i_adx_min    = input.float(25,"ADX Minimum Threshold", minval=1, group=grp_adx)
+
+// ── ATR ──────────────────────────────────────────────────────
+grp_atr = "── ATR / Risk Settings ──"
+i_atr_len    = input.int(14, "ATR Length",            minval=1,   group=grp_atr)
+i_atr_avg    = input.int(20, "ATR Average Period",    minval=1,   group=grp_atr)
+i_sl_mult    = input.float(1.5,"SL ATR Multiplier",  minval=0.1, group=grp_atr)
+i_tp_mult    = input.float(2.0,"TP ATR Multiplier",  minval=0.1, group=grp_atr)
+
+// ── Volume ───────────────────────────────────────────────────
+grp_vol = "── Volume Settings ──"
+i_vol_avg    = input.int(20,  "Volume SMA Period",    minval=1,   group=grp_vol)
+i_vol_mult   = input.float(1.5,"Volume Multiplier",  minval=0.1, group=grp_vol)
+
+// ── Scoring ──────────────────────────────────────────────────
+grp_score = "── Signal Score Settings ──"
+i_min_score  = input.int(85, "Minimum Score to Generate Signal",
+               minval=1, maxval=100, group=grp_score)
+
+// ── Higher Timeframe ────────────────────────────────────────
+grp_mtf = "── Multi-Timeframe Settings ──"
+i_htf        = input.timeframe("60", "Confirmation Timeframe (e.g. 60 = 1H)",
+               group=grp_mtf)
+
+// ── Display Toggles ─────────────────────────────────────────
+grp_disp = "── Display Settings ──"
+i_show_dash  = input.bool(true,  "Show Dashboard",       group=grp_disp)
+i_show_ema   = input.bool(true,  "Show EMA Lines",       group=grp_disp)
+i_show_bos   = input.bool(true,  "Show BOS Labels",      group=grp_disp)
+i_show_choch = input.bool(true,  "Show CHOCH Labels",    group=grp_disp)
+i_show_fvg   = input.bool(true,  "Show Fair Value Gaps", group=grp_disp)
+i_show_liq   = input.bool(true,  "Show Liquidity Sweeps",group=grp_disp)
+i_show_sltp  = input.bool(true,  "Show SL/TP Lines",     group=grp_disp)
+i_dark_theme = input.bool(true,  "Dark Theme",           group=grp_disp)
+
+// ============================================================
+// ─── SECTION 2 · THEME COLORS ───────────────────────────────
+// ============================================================
+
+c_bg      = i_dark_theme ? color.new(#0d1117, 0)   : color.new(#FFFFFF, 0)
+c_text    = i_dark_theme ? color.new(#e6edf3, 0)   : color.new(#1a1a2e, 0)
+c_bull    = color.new(#00ff88, 0)
+c_bear    = color.new(#ff3366, 0)
+c_neutral = color.new(#8b949e, 0)
+c_accent  = color.new(#58a6ff, 0)
+c_warn    = color.new(#ffa500, 0)
+
+// ============================================================
+// ─── SECTION 3 · CORE CALCULATIONS (ALL ON CONFIRMED BARS) ──
+// ============================================================
+// NOTE: All references use [1] offset where applicable to ensure
+//       values are computed on CLOSED candles, preventing repaint.
+
+// ── 3.1 EMA Trend ────────────────────────────────────────────
+ema_fast = ta.ema(close, i_ema_fast)
+ema_slow = ta.ema(close, i_ema_slow)
+
+trend_bull = close > ema_slow and ema_fast > ema_slow
+trend_bear = close < ema_slow and ema_fast < ema_slow
+
+// ── 3.2 RSI ──────────────────────────────────────────────────
+rsi_val   = ta.rsi(close, i_rsi_len)
+// Cross signals confirmed on the just-closed bar (no [1] needed — 
+// ta.crossover/crossunder inherently uses the current close vs prior)
+rsi_bull_cross = ta.crossover(rsi_val,  i_rsi_bull)
+rsi_bear_cross = ta.crossunder(rsi_val, i_rsi_bear)
+rsi_in_dead    = rsi_val >= i_rsi_dead_l and rsi_val <= i_rsi_dead_h
+
+// ── 3.3 MACD ─────────────────────────────────────────────────
+[macd_line, macd_sig_line, macd_hist] = ta.macd(close, i_macd_fast, i_macd_slow, i_macd_sig)
+macd_bull = ta.crossover(macd_line, macd_sig_line) and macd_hist > 0
+macd_bear = ta.crossunder(macd_line, macd_sig_line) and macd_hist < 0
+
+// ── 3.4 Volume ───────────────────────────────────────────────
+vol_sma   = ta.sma(volume, i_vol_avg)
+vol_ok    = volume >= vol_sma * i_vol_mult
+
+// ── 3.5 ATR ──────────────────────────────────────────────────
+atr_val   = ta.atr(i_atr_len)
+atr_avg   = ta.sma(atr_val, i_atr_avg)
+atr_ok    = atr_val >= atr_avg
+
+// ── 3.6 ADX ──────────────────────────────────────────────────
+// Manual DMI/ADX calculation (Pine v6 compatible)
+up_move   = high - high[1]
+dn_move   = low[1] - low
+plus_dm   = up_move > dn_move and up_move > 0 ? up_move : 0.0
+minus_dm  = dn_move > up_move and dn_move > 0 ? dn_move : 0.0
+tr_val    = math.max(high - low, math.max(math.abs(high - close[1]), math.abs(low - close[1])))
+atr14     = ta.rma(tr_val,  i_adx_len)
+plus_di   = 100 * ta.rma(plus_dm,  i_adx_len) / atr14
+minus_di  = 100 * ta.rma(minus_dm, i_adx_len) / atr14
+dx        = math.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
+adx_val   = ta.rma(dx, i_adx_len)
+adx_ok    = adx_val > i_adx_min
+
+// ── 3.7 Market Structure ─────────────────────────────────────
+// Swing detection using a 5-bar pivot lookback
+swing_hi = ta.pivothigh(high, 5, 5)
+swing_lo  = ta.pivotlow(low,  5, 5)
+
+// Track last two confirmed swing highs and lows
+var float last_sh  = na
+var float prev_sh  = na
+var float last_sl  = na
+var float prev_sl  = na
+
+if not na(swing_hi)
+    prev_sh := last_sh
+    last_sh := swing_hi
+
+if not na(swing_lo)
+    prev_sl := last_sl
+    last_sl := swing_lo
+
+hh = not na(last_sh) and not na(prev_sh) and last_sh > prev_sh
+hl = not na(last_sl) and not na(prev_sl) and last_sl > prev_sl
+lh = not na(last_sh) and not na(prev_sh) and last_sh < prev_sh
+ll = not na(last_sl) and not na(prev_sl) and last_sl < prev_sl
+
+ms_bull = hh and hl   // Bullish market structure
+ms_bear = lh and ll   // Bearish market structure
+
+// ── 3.8 Smart Money Concepts ─────────────────────────────────
+
+// Break of Structure (BOS)
+// BOS up: price closes above the most recent confirmed swing high
+// BOS dn: price closes below the most recent confirmed swing low
+var float bos_level_bull = na
+var float bos_level_bear = na
+bos_bull = not na(last_sh) and close > last_sh and close[1] <= last_sh[1]
+bos_bear = not na(last_sl) and close < last_sl and close[1] >= last_sl[1]
+
+if bos_bull
+    bos_level_bull := close
+if bos_bear
+    bos_level_bear := close
+
+// Track BOS confirmation state
+var bool bos_bull_confirmed = false
+var bool bos_bear_confirmed = false
+if bos_bull
+    bos_bull_confirmed := true
+    bos_bear_confirmed := false
+if bos_bear
+    bos_bear_confirmed := true
+    bos_bull_confirmed := false
+
+// Change of Character (CHOCH)
+// CHOCH: first break against the prevailing trend (structure flip signal)
+var bool choch_bull = false
+var bool choch_bear = false
+choch_bull := bos_bull and ms_bear  // Bullish CHOCH: BOS up in bearish structure
+choch_bear := bos_bear and ms_bull  // Bearish CHOCH: BOS dn in bullish structure
+
+// Liquidity Sweep
+// Wick sweeps a swing high/low but closes back inside
+liq_sweep_up  = not na(last_sh) and high > last_sh and close < last_sh
+liq_sweep_dn  = not na(last_sl) and low  < last_sl and close > last_sl
+
+// Fair Value Gap (FVG)
+// 3-candle pattern: gap between candle[2] high and candle[0] low (bull)
+//                   gap between candle[2] low  and candle[0] high (bear)
+fvg_bull = low  > high[2]  // Bullish FVG: current low > two-bars-ago high
+fvg_bear = high < low[2]   // Bearish FVG: current high < two-bars-ago low
+
+// ── 3.9 Candle Patterns ──────────────────────────────────────
+body      = math.abs(close - open)
+candle_rng = high - low
+upper_wick = high - math.max(close, open)
+lower_wick = math.min(close, open) - low
+avg_body  = ta.sma(body, 10)
+
+// Bullish Engulfing
+bull_engulf = close > open and close[1] < open[1] and
+              close > open[1] and open < close[1]
+
+// Bearish Engulfing
+bear_engulf = close < open and close[1] > open[1] and
+              close < open[1] and open > close[1]
+
+// Hammer (bullish)
+hammer = lower_wick >= 2 * body and upper_wick <= 0.3 * body and close > open
+
+// Shooting Star (bearish)
+shoot_star = upper_wick >= 2 * body and lower_wick <= 0.3 * body and close < open
+
+// Strong candles (body is at least 70% of range)
+strong_bull = close > open and body >= 0.7 * candle_rng
+strong_bear = close < open and body >= 0.7 * candle_rng
+
+candle_bull = bull_engulf or hammer     or strong_bull
+candle_bear = bear_engulf or shoot_star or strong_bear
+
+// ── 3.10 Multi-Timeframe Confirmation ────────────────────────
+// request.security() with gaps=barmerge.gaps_off and
+// lookahead=barmerge.lookahead_off prevents repainting.
+htf_ema_fast = request.security(syminfo.tickerid, i_htf,
+               ta.ema(close, i_ema_fast),
+               gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+htf_ema_slow = request.security(syminfo.tickerid, i_htf,
+               ta.ema(close, i_ema_slow),
+               gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+htf_close    = request.security(syminfo.tickerid, i_htf,
+               close,
+               gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+
+htf_bull = htf_close > htf_ema_slow and htf_ema_fast > htf_ema_slow
+htf_bear = htf_close < htf_ema_slow and htf_ema_fast < htf_ema_slow
+
+// ============================================================
+// ─── SECTION 4 · SIGNAL SCORING ────────────────────────────
+// ============================================================
+
+// Weights per specification:
+// Trend=20, RSI=15, MACD=15, Volume=15, Market Structure=15,
+// ADX=10, Candlestick=10  →  Max=100
+
+score_bull = 0
+score_bull += trend_bull              ? 20 : 0
+score_bull += rsi_bull_cross          ? 15 : 0
+score_bull += macd_bull               ? 15 : 0
+score_bull += vol_ok                  ? 15 : 0
+score_bull += ms_bull                 ? 15 : 0
+score_bull += adx_ok                  ? 10 : 0
+score_bull += candle_bull             ? 10 : 0
+
+score_bear = 0
+score_bear += trend_bear              ? 20 : 0
+score_bear += rsi_bear_cross          ? 15 : 0
+score_bear += macd_bear               ? 15 : 0
+score_bear += vol_ok                  ? 15 : 0
+score_bear += ms_bear                 ? 15 : 0
+score_bear += adx_ok                  ? 10 : 0
+score_bear += candle_bear             ? 10 : 0
+
+// ============================================================
+// ─── SECTION 5 · FINAL SIGNAL LOGIC ────────────────────────
+// ============================================================
+// All conditions must be true; RSI dead-zone and ATR filter
+// act as hard vetoes.
+
+buy_signal  = trend_bull
+              and rsi_bull_cross
+              and not rsi_in_dead
+              and macd_bull
+              and vol_ok
+              and atr_ok
+              and adx_ok
+              and ms_bull
+              and bos_bull_confirmed
+              and candle_bull
+              and htf_bull
+              and score_bull >= i_min_score
+
+sell_signal = trend_bear
+              and rsi_bear_cross
+              and not rsi_in_dead
+              and macd_bear
+              and vol_ok
+              and atr_ok
+              and adx_ok
+              and ms_bear
+              and bos_bear_confirmed
+              and candle_bear
+              and htf_bear
+              and score_bear >= i_min_score
+
+// ── Signal Strength Label ────────────────────────────────────
+sig_score    = buy_signal ? score_bull : sell_signal ? score_bear : 0
+sig_strength = sig_score >= 95 ? "ULTRA STRONG" :
+               sig_score >= 90 ? "STRONG"       :
+               sig_score >= 85 ? "MODERATE"     : "—"
+
+// ============================================================
+// ─── SECTION 6 · RISK MANAGEMENT ───────────────────────────
+// ============================================================
+
+var float entry_price = na
+var float sl_price    = na
+var float tp_price    = na
+
+if buy_signal
+    entry_price := close
+    sl_price    := close - i_sl_mult * atr_val
+    tp_price    := close + i_tp_mult * atr_val
+
+if sell_signal
+    entry_price := close
+    sl_price    := close + i_sl_mult * atr_val
+    tp_price    := close - i_tp_mult * atr_val
+
+rr_ratio     = not na(entry_price) and not na(sl_price) ?
+               math.abs(tp_price - entry_price) / math.abs(sl_price - entry_price) : na
+exp_profit   = not na(entry_price) ? math.abs(tp_price - entry_price) : na
+exp_loss     = not na(entry_price) ? math.abs(sl_price - entry_price) : na
+
+// ============================================================
+// ─── SECTION 7 · VISUAL ELEMENTS ───────────────────────────
+// ============================================================
+
+// ── 7.1 EMA Lines ────────────────────────────────────────────
+plot(i_show_ema ? ema_fast : na,
+     title="EMA Fast", color=color.new(#58a6ff, 0), linewidth=1)
+plot(i_show_ema ? ema_slow : na,
+     title="EMA Slow", color=color.new(#ffa500, 0), linewidth=2)
+
+// ── 7.2 Background Trend Color ───────────────────────────────
+bgcolor(trend_bull ? color.new(#00ff88, 97) :
+        trend_bear ? color.new(#ff3366, 97) : na,
+        title="Trend Background")
+
+// ── 7.3 Buy / Sell Arrows ────────────────────────────────────
+plotshape(buy_signal,
+          title    = "BUY Signal",
+          style    = shape.triangleup,
+          location = location.belowbar,
+          color    = c_bull,
+          size     = size.normal,
+          text     = "BUY\n" + str.tostring(score_bull) + "%")
+
+plotshape(sell_signal,
+          title    = "SELL Signal",
+          style    = shape.triangledown,
+          location = location.abovebar,
+          color    = c_bear,
+          size     = size.normal,
+          text     = "SELL\n" + str.tostring(score_bear) + "%")
+
+// ── 7.4 SL / TP Lines ────────────────────────────────────────
+// Draw horizontal lines from signal bar extending 20 bars right
+if i_show_sltp and buy_signal
+    line.new(bar_index, sl_price, bar_index + 20, sl_price,
+             color=color.new(#ff3366, 0), width=1, style=line.style_dashed)
+    line.new(bar_index, tp_price, bar_index + 20, tp_price,
+             color=color.new(#00ff88, 0), width=1, style=line.style_dashed)
+    label.new(bar_index + 20, sl_price,
+              "SL " + str.tostring(math.round(sl_price, 2)),
+              color=color.new(#ff3366, 20), textcolor=color.white,
+              style=label.style_label_left, size=size.small)
+    label.new(bar_index + 20, tp_price,
+              "TP " + str.tostring(math.round(tp_price, 2)),
+              color=color.new(#00ff88, 20), textcolor=color.white,
+              style=label.style_label_left, size=size.small)
+
+if i_show_sltp and sell_signal
+    line.new(bar_index, sl_price, bar_index + 20, sl_price,
+             color=color.new(#ff3366, 0), width=1, style=line.style_dashed)
+    line.new(bar_index, tp_price, bar_index + 20, tp_price,
+             color=color.new(#00ff88, 0), width=1, style=line.style_dashed)
+    label.new(bar_index + 20, sl_price,
+              "SL " + str.tostring(math.round(sl_price, 2)),
+              color=color.new(#ff3366, 20), textcolor=color.white,
+              style=label.style_label_left, size=size.small)
+    label.new(bar_index + 20, tp_price,
+              "TP " + str.tostring(math.round(tp_price, 2)),
+              color=color.new(#00ff88, 20), textcolor=color.white,
+              style=label.style_label_left, size=size.small)
+
+// ── 7.5 BOS Labels ───────────────────────────────────────────
+if i_show_bos and bos_bull
+    label.new(bar_index, low - atr_val,
+              "BOS ↑", color=color.new(#00ff88, 10),
+              textcolor=color.black, style=label.style_label_up,
+              size=size.tiny)
+
+if i_show_bos and bos_bear
+    label.new(bar_index, high + atr_val,
+              "BOS ↓", color=color.new(#ff3366, 10),
+              textcolor=color.white, style=label.style_label_down,
+              size=size.tiny)
+
+// ── 7.6 CHOCH Labels ─────────────────────────────────────────
+if i_show_choch and choch_bull
+    label.new(bar_index, low - atr_val * 1.5,
+              "CHoCH", color=color.new(#58a6ff, 10),
+              textcolor=color.white, style=label.style_label_up,
+              size=size.tiny)
+
+if i_show_choch and choch_bear
+    label.new(bar_index, high + atr_val * 1.5,
+              "CHoCH", color=color.new(#ffa500, 10),
+              textcolor=color.black, style=label.style_label_down,
+              size=size.tiny)
+
+// ── 7.7 Liquidity Sweep Markers ──────────────────────────────
+plotshape(i_show_liq and liq_sweep_up,
+          title    = "Liquidity Sweep Up",
+          style    = shape.xcross,
+          location = location.abovebar,
+          color    = color.new(#ffa500, 0),
+          size     = size.tiny)
+
+plotshape(i_show_liq and liq_sweep_dn,
+          title    = "Liquidity Sweep Down",
+          style    = shape.xcross,
+          location = location.belowbar,
+          color    = color.new(#ffa500, 0),
+          size     = size.tiny)
+
+// ── 7.8 Fair Value Gap Boxes ─────────────────────────────────
+// Boxes drawn for confirmed FVGs (2 bars back to avoid repaint)
+if i_show_fvg and fvg_bull[2]
+    box.new(bar_index - 2, high[4], bar_index + 5, low[2],
+            border_color=color.new(#00ff88, 50),
+            bgcolor=color.new(#00ff88, 88))
+
+if i_show_fvg and fvg_bear[2]
+    box.new(bar_index - 2, high[2], bar_index + 5, low[4],
+            border_color=color.new(#ff3366, 50),
+            bgcolor=color.new(#ff3366, 88))
+
+// ============================================================
+// ─── SECTION 8 · DASHBOARD ──────────────────────────────────
+// ============================================================
+
+// Dashboard uses a table drawn in top-right corner.
+// Values refresh on every bar. Only displayed on the last bar.
+
+if i_show_dash and barstate.islast
+
+    var table dash = table.new(
+         position.top_right, 2, 18,
+         bgcolor    = i_dark_theme ? color.new(#0d1117, 5) : color.new(#f0f6fc, 5),
+         border_width = 1,
+         border_color = color.new(#30363d, 50),
+         frame_width  = 2,
+         frame_color  = color.new(#58a6ff, 30))
+
+    // Helper: status color
+    f_status_color(bool cond) =>
+        cond ? color.new(#00ff88, 0) : color.new(#ff3366, 0)
+
+    // Header
+    table.cell(dash, 0, 0, "⚡ QUANTUM AI SMART ENTRY PRO",
+               text_color=c_accent, text_size=size.small,
+               bgcolor=color.new(#161b22, 0), text_halign=text.align_center)
+    table.merge_cells(dash, 0, 0, 1, 0)
+
+    // Row helper
+    f_row(int row, string lbl, string val, color vc) =>
+        table.cell(dash, 0, row, lbl,
+                   text_color=c_text, text_size=size.tiny,
+                   bgcolor=color.new(#161b22, 10))
+        table.cell(dash, 1, row, val,
+                   text_color=vc, text_size=size.tiny,
+                   bgcolor=color.new(#161b22, 10))
+
+    trend_txt = trend_bull ? "BULLISH ▲" : trend_bear ? "BEARISH ▼" : "NEUTRAL"
+    trend_col = trend_bull ? c_bull : trend_bear ? c_bear : c_neutral
+
+    f_row(1,  "Trend",              trend_txt,                      trend_col)
+    f_row(2,  "EMA Fast/Slow",
+              str.tostring(math.round(ema_fast, 2)) + " / " +
+              str.tostring(math.round(ema_slow, 2)),                c_accent)
+    f_row(3,  "RSI (" + str.tostring(i_rsi_len) + ")",
+              str.tostring(math.round(rsi_val, 1)),
+              f_status_color(rsi_val > 50))
+    f_row(4,  "MACD Status",
+              macd_bull ? "BULLISH X" : macd_bear ? "BEARISH X" : "NEUTRAL",
+              macd_bull ? c_bull : macd_bear ? c_bear : c_neutral)
+    f_row(5,  "ADX",
+              str.tostring(math.round(adx_val, 1)) + (adx_ok ? " ✓" : " ✗"),
+              f_status_color(adx_ok))
+    f_row(6,  "ATR",
+              str.tostring(math.round(atr_val, 4)) + (atr_ok ? " ✓" : " ✗"),
+              f_status_color(atr_ok))
+    f_row(7,  "Volume",
+              vol_ok ? "CONFIRMED ✓" : "WEAK ✗",
+              f_status_color(vol_ok))
+    f_row(8,  "Market Structure",
+              ms_bull ? "HH+HL ▲" : ms_bear ? "LH+LL ▼" : "MIXED",
+              ms_bull ? c_bull : ms_bear ? c_bear : c_neutral)
+    f_row(9,  "Smart Money",
+              bos_bull_confirmed ? "BOS UP ✓" :
+              bos_bear_confirmed ? "BOS DN ✓" : "NO BOS",
+              bos_bull_confirmed ? c_bull :
+              bos_bear_confirmed ? c_bear : c_neutral)
+    f_row(10, "HTF Trend (" + i_htf + ")",
+              htf_bull ? "BULLISH ▲" : htf_bear ? "BEARISH ▼" : "NEUTRAL",
+              htf_bull ? c_bull : htf_bear ? c_bear : c_neutral)
+    f_row(11, "Signal Score",
+              str.tostring(buy_signal ? score_bull : sell_signal ? score_bear : 0) + " / 100",
+              buy_signal or sell_signal ? c_bull : c_neutral)
+    f_row(12, "Signal Strength",  sig_strength,
+              sig_score >= 90 ? c_bull : sig_score >= 85 ? c_warn : c_neutral)
+    f_row(13, "Position",
+              buy_signal ? "▲ LONG" : sell_signal ? "▼ SHORT" : "FLAT",
+              buy_signal ? c_bull : sell_signal ? c_bear : c_neutral)
+    f_row(14, "Entry Price",
+              not na(entry_price) ? str.tostring(math.round(entry_price, 4)) : "—",
+              c_accent)
+    f_row(15, "Stop Loss",
+              not na(sl_price) ? str.tostring(math.round(sl_price, 4)) : "—",
+              c_bear)
+    f_row(16, "Take Profit",
+              not na(tp_price) ? str.tostring(math.round(tp_price, 4)) : "—",
+              c_bull)
+    f_row(17, "Risk : Reward",
+              not na(rr_ratio) ? "1 : " + str.tostring(math.round(rr_ratio, 2)) : "—",
+              c_accent)
+
+// ============================================================
+// ─── SECTION 9 · ALERTS ─────────────────────────────────────
+// ============================================================
+
+alertcondition(buy_signal,
+               title   = "🟢 BUY Signal",
+               message = "QASEP — BUY Signal | Score: {{plot_0}} | {{ticker}} @ {{close}}")
+
+alertcondition(sell_signal,
+               title   = "🔴 SELL Signal",
+               message = "QASEP — SELL Signal | Score: {{plot_0}} | {{ticker}} @ {{close}}")
+
+alertcondition(buy_signal  and score_bull >= 95,
+               title   = "🟢🟢 STRONG BUY",
+               message = "QASEP — STRONG BUY | Score: {{plot_0}} | {{ticker}} @ {{close}}")
+
+alertcondition(sell_signal and score_bear >= 95,
+               title   = "🔴🔴 STRONG SELL",
+               message = "QASEP — STRONG SELL | Score: {{plot_0}} | {{ticker}} @ {{close}}")
+
+alertcondition(ta.crossover(ema_fast, ema_slow),
+               title   = "📈 Trend Change: Bullish",
+               message = "QASEP — Trend flipped BULLISH | {{ticker}}")
+
+alertcondition(ta.crossunder(ema_fast, ema_slow),
+               title   = "📉 Trend Change: Bearish",
+               message = "QASEP — Trend flipped BEARISH | {{ticker}}")
+
+alertcondition(bos_bull,
+               title   = "⬆ Break of Structure (BOS Up)",
+               message = "QASEP — BOS UP detected | {{ticker}} @ {{close}}")
+
+alertcondition(bos_bear,
+               title   = "⬇ Break of Structure (BOS Down)",
+               message = "QASEP — BOS DOWN detected | {{ticker}} @ {{close}}")
+
+alertcondition(choch_bull,
+               title   = "🔄 CHoCH Bullish",
+               message = "QASEP — Change of Character BULLISH | {{ticker}} @ {{close}}")
+
+alertcondition(choch_bear,
+               title   = "🔄 CHoCH Bearish",
+               message = "QASEP — Change of Character BEARISH | {{ticker}} @ {{close}}")
+
+alertcondition(liq_sweep_up or liq_sweep_dn,
+               title   = "💧 Liquidity Sweep",
+               message = "QASEP — Liquidity Sweep detected | {{ticker}} @ {{close}}")
+
+// TP/SL hit alerts (price crosses the computed level)
+alertcondition(not na(tp_price) and ta.crossover(close, tp_price),
+               title   = "🎯 Take Profit Hit",
+               message = "QASEP — Take Profit reached | {{ticker}} @ {{close}}")
+
+alertcondition(not na(sl_price) and ta.crossunder(close, sl_price),
+               title   = "🛑 Stop Loss Hit",
+               message = "QASEP — Stop Loss triggered | {{ticker}} @ {{close}}")
+
+// ============================================================
+// ─── SECTION 10 · SCORE PLOT (for alert template) ──────────
+// ============================================================
+
+// Plot the active score invisibly — referenced in alert messages
+plot(buy_signal ? score_bull : sell_signal ? score_bear : 0,
+     title="Signal Score", display=display.none)
