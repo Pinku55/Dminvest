@@ -355,13 +355,15 @@ bgcolor(trend_bull ? color.new(#00ff88, 97) :
         title="Trend Background")
 
 // ── 7.3 Buy / Sell Arrows ────────────────────────────────────
+// NOTE: plotshape() requires `text` to be a CONST string, so the
+// dynamic score is rendered separately via label.new() below.
 plotshape(buy_signal,
           title    = "BUY Signal",
           style    = shape.triangleup,
           location = location.belowbar,
           color    = c_bull,
           size     = size.normal,
-          text     = "BUY\n" + str.tostring(score_bull) + "%")
+          text     = "BUY")
 
 plotshape(sell_signal,
           title    = "SELL Signal",
@@ -369,7 +371,26 @@ plotshape(sell_signal,
           location = location.abovebar,
           color    = c_bear,
           size     = size.normal,
-          text     = "SELL\n" + str.tostring(score_bear) + "%")
+          text     = "SELL")
+
+// Dynamic score labels (labels allow series strings)
+if buy_signal
+    label.new(bar_index, low,
+              "BUY " + str.tostring(score_bull) + "%",
+              yloc      = yloc.belowbar,
+              color     = c_bull,
+              textcolor = color.black,
+              style     = label.style_label_up,
+              size      = size.small)
+
+if sell_signal
+    label.new(bar_index, high,
+              "SELL " + str.tostring(score_bear) + "%",
+              yloc      = yloc.abovebar,
+              color     = c_bear,
+              textcolor = color.white,
+              style     = label.style_label_down,
+              size      = size.small)
 
 // ── 7.4 SL / TP Lines ────────────────────────────────────────
 // Draw horizontal lines from signal bar extending 20 bars right
