@@ -362,7 +362,7 @@ plotshape(buy_signal,
           style    = shape.triangleup,
           location = location.belowbar,
           color    = c_bull,
-          size     = size.normal,
+          size     = size.large,
           text     = "BUY")
 
 plotshape(sell_signal,
@@ -370,7 +370,7 @@ plotshape(sell_signal,
           style    = shape.triangledown,
           location = location.abovebar,
           color    = c_bear,
-          size     = size.normal,
+          size     = size.large,
           text     = "SELL")
 
 // Dynamic score labels (labels allow series strings)
@@ -381,7 +381,7 @@ if buy_signal
               color     = c_bull,
               textcolor = color.black,
               style     = label.style_label_up,
-              size      = size.small)
+              size      = size.large)
 
 if sell_signal
     label.new(bar_index, high,
@@ -390,7 +390,7 @@ if sell_signal
               color     = c_bear,
               textcolor = color.white,
               style     = label.style_label_down,
-              size      = size.small)
+              size      = size.large)
 
 // ── 7.4 SL / TP Lines ────────────────────────────────────────
 // Draw horizontal lines from signal bar extending 20 bars right
@@ -402,11 +402,11 @@ if i_show_sltp and buy_signal
     label.new(bar_index + 20, sl_price,
               "SL " + str.tostring(math.round(sl_price, 2)),
               color=color.new(#ff3366, 20), textcolor=color.white,
-              style=label.style_label_left, size=size.small)
+              style=label.style_label_left, size=size.normal)
     label.new(bar_index + 20, tp_price,
               "TP " + str.tostring(math.round(tp_price, 2)),
               color=color.new(#00ff88, 20), textcolor=color.white,
-              style=label.style_label_left, size=size.small)
+              style=label.style_label_left, size=size.normal)
 
 if i_show_sltp and sell_signal
     line.new(bar_index, sl_price, bar_index + 20, sl_price,
@@ -416,37 +416,37 @@ if i_show_sltp and sell_signal
     label.new(bar_index + 20, sl_price,
               "SL " + str.tostring(math.round(sl_price, 2)),
               color=color.new(#ff3366, 20), textcolor=color.white,
-              style=label.style_label_left, size=size.small)
+              style=label.style_label_left, size=size.normal)
     label.new(bar_index + 20, tp_price,
               "TP " + str.tostring(math.round(tp_price, 2)),
               color=color.new(#00ff88, 20), textcolor=color.white,
-              style=label.style_label_left, size=size.small)
+              style=label.style_label_left, size=size.normal)
 
 // ── 7.5 BOS Labels ───────────────────────────────────────────
 if i_show_bos and bos_bull
     label.new(bar_index, low - atr_val,
               "BOS ↑", color=color.new(#00ff88, 10),
               textcolor=color.black, style=label.style_label_up,
-              size=size.tiny)
+              size=size.normal)
 
 if i_show_bos and bos_bear
     label.new(bar_index, high + atr_val,
               "BOS ↓", color=color.new(#ff3366, 10),
               textcolor=color.white, style=label.style_label_down,
-              size=size.tiny)
+              size=size.normal)
 
 // ── 7.6 CHOCH Labels ─────────────────────────────────────────
 if i_show_choch and choch_bull
     label.new(bar_index, low - atr_val * 1.5,
               "CHoCH", color=color.new(#58a6ff, 10),
               textcolor=color.white, style=label.style_label_up,
-              size=size.tiny)
+              size=size.normal)
 
 if i_show_choch and choch_bear
     label.new(bar_index, high + atr_val * 1.5,
               "CHoCH", color=color.new(#ffa500, 10),
               textcolor=color.black, style=label.style_label_down,
-              size=size.tiny)
+              size=size.normal)
 
 // ── 7.7 Liquidity Sweep Markers ──────────────────────────────
 plotshape(i_show_liq and liq_sweep_up,
@@ -490,10 +490,10 @@ f_status_color(bool cond) =>
 
 f_dash_row(table tbl, int row, string lbl, string val, color vc) =>
     table.cell(tbl, 0, row, lbl,
-               text_color=c_text, text_size=size.tiny,
+               text_color=c_text, text_size=size.normal,
                bgcolor=color.new(#161b22, 10))
     table.cell(tbl, 1, row, val,
-               text_color=vc, text_size=size.tiny,
+               text_color=vc, text_size=size.normal,
                bgcolor=color.new(#161b22, 10))
 
 if i_show_dash and barstate.islast
@@ -508,7 +508,7 @@ if i_show_dash and barstate.islast
 
     // Header
     table.cell(dash, 0, 0, "⚡ QUANTUM AI SMART ENTRY PRO",
-               text_color=c_accent, text_size=size.small,
+               text_color=c_accent, text_size=size.large,
                bgcolor=color.new(#161b22, 0), text_halign=text.align_center)
     table.merge_cells(dash, 0, 0, 1, 0)
 
