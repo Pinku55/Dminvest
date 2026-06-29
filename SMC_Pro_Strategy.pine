@@ -55,6 +55,8 @@ i_struct_lkb = input.int(8, "Signal Confluence Lookback (bars)", minval=1, maxva
 i_use_bos    = input.bool(true, "Require BOS / CHoCH",     group=gSMC)
 i_use_ob     = input.bool(true, "Require Order Block / FVG confluence", group=gSMC)
 i_ob_lkb     = input.int(15, "Order Block search depth (bars)", minval=3, maxval=50, group=gSMC)
+i_signal_mode= input.string("Confluence", "Signal Mode", options=["Confluence","Strict"], group=gSMC, tooltip="Confluence = a trade fires when at least N enabled confirmations agree. Strict = ALL enabled filters must align on the same bar (very few signals).")
+i_min_conf   = input.int(4, "Min confluences to trigger (Confluence mode)", minval=1, maxval=8, group=gSMC)
 
 // ── 1.3 Fair Value Gap ───────────────────────────────────────────────────────
 gFVG         = "3 · Fair Value Gap"
@@ -330,15 +332,16 @@ mom_bull = not i_use_mom or mom_bull_cnt >= i_mom_min
 mom_bear = not i_use_mom or mom_bear_cnt >= i_mom_min
 
 // ── 3.11 Volume ─────────────────────────────────────────────────────────────
+// Guard: many FX / index feeds have no (or zero) volume. When volume data is
+// unavailable we must NOT block trades — treat volume confirmation as neutral.
 vol_sma  = ta.sma(volume, i_vol_len)
-rel_vol  = vol_sma > 0 ? volume / vol_sma : 1.0
-vol_spike= volume >= vol_sma * i_vol_mult
+has_vol  = not na(vol_sma) and vol_sma > 0
+rel_vol  = has_vol ? volume / vol_sma : 1.0
+vol_spike= has_vol ? (volume >= vol_sma * i_vol_mult) : true
 obv_val  = ta.obv
 obv_ema  = ta.ema(obv_val, i_vol_len)
-obv_rising = obv_val > obv_ema
-obv_falling= obv_val < obv_ema
-vol_bull = not i_use_vol or (vol_spike and obv_rising)
-vol_bear = not i_use_vol or (vol_spike and obv_falling)
+obv_rising = not has_vol or obv_val > obv_ema
+obv_falling= not has_vol or obv_val < obv_ema
 
 // ── 3.12 ADX / DMI (manual, v6-safe) ───────────────────────────────────────
 up_move  = high - high[1]
@@ -404,29 +407,39 @@ bars_sweep_bear = nz(ta.barssince(liq_sweep_up),    100000)
 bars_fvg_bull   = nz(ta.barssince(fvg_bull),        100000)
 bars_fvg_bear   = nz(ta.barssince(fvg_bear),        100000)
 
-// Trend gates
-trend_up   = not i_use_trend or (ema_bull and (not i_use_struct or ms_bull or struct_evt_bull))
-trend_dn   = not i_use_trend or (ema_bear and (not i_use_struct or ms_bear or struct_evt_bear))
+// Individual BULLISH confirmations (each respects its enable toggle below)
+c_trend_up = ema_fast > ema_slow and (not i_use_struct or not ms_bear)  // EMA up + structure not bearish (allows discount pullbacks)
+c_bos_up   = bars_bos_bull <= i_struct_lkb                        // recent bullish BOS / CHoCH
+c_ob_up    = in_bull_ob or bars_fvg_bull <= i_struct_lkb          // bullish OB retest or recent bullish FVG
+c_liq_up   = bars_sweep_bull <= i_struct_lkb                      // recent sell-side liquidity grab
+c_mom_up   = mom_bull_cnt >= i_mom_min                            // momentum aligned
+c_vol_up   = vol_spike and obv_rising                             // volume aligned (neutral if no vol data)
+c_htf_up   = htf_bull                                             // higher-timeframe bias
+c_pd_up    = in_discount                                          // price in discount
 
-// Structure gates
-bos_up_ok  = not i_use_bos or bars_bos_bull <= i_struct_lkb
-bos_dn_ok  = not i_use_bos or bars_bos_bear <= i_struct_lkb
+// Individual BEARISH confirmations
+c_trend_dn = ema_fast < ema_slow and (not i_use_struct or not ms_bull)
+c_bos_dn   = bars_bos_bear <= i_struct_lkb
+c_ob_dn    = in_bear_ob or bars_fvg_bear <= i_struct_lkb
+c_liq_dn   = bars_sweep_bear <= i_struct_lkb
+c_mom_dn   = mom_bear_cnt >= i_mom_min
+c_vol_dn   = vol_spike and obv_falling
+c_htf_dn   = htf_bear
+c_pd_dn    = in_premium
 
-// Order Block / FVG gates
-ob_up_ok   = not i_use_ob or in_bull_ob or bars_fvg_bull <= i_struct_lkb
-ob_dn_ok   = not i_use_ob or in_bear_ob or bars_fvg_bear <= i_struct_lkb
+// How many filters are switched ON
+f_on(bool c) => c ? 1 : 0
+enabled_cnt = f_on(i_use_trend) + f_on(i_use_bos) + f_on(i_use_ob) + f_on(i_use_liq) + f_on(i_use_mom) + f_on(i_use_vol) + f_on(i_use_htf) + f_on(i_use_pd)
 
-// Liquidity gates
-liq_up_ok  = not i_use_liq or bars_sweep_bull <= i_struct_lkb
-liq_dn_ok  = not i_use_liq or bars_sweep_bear <= i_struct_lkb
+// How many enabled filters currently agree (long / short)
+buy_cnt  = f_on(i_use_trend and c_trend_up) + f_on(i_use_bos and c_bos_up) + f_on(i_use_ob and c_ob_up) + f_on(i_use_liq and c_liq_up) + f_on(i_use_mom and c_mom_up) + f_on(i_use_vol and c_vol_up) + f_on(i_use_htf and c_htf_up) + f_on(i_use_pd and c_pd_up)
+sell_cnt = f_on(i_use_trend and c_trend_dn) + f_on(i_use_bos and c_bos_dn) + f_on(i_use_ob and c_ob_dn) + f_on(i_use_liq and c_liq_dn) + f_on(i_use_mom and c_mom_dn) + f_on(i_use_vol and c_vol_dn) + f_on(i_use_htf and c_htf_dn) + f_on(i_use_pd and c_pd_dn)
 
-// HTF gates
-htf_up_ok  = not i_use_htf or htf_bull
-htf_dn_ok  = not i_use_htf or htf_bear
+// Confirmations required: ALL enabled (Strict) or the user minimum (Confluence)
+conf_need = math.max(1, i_signal_mode == "Strict" ? enabled_cnt : math.min(i_min_conf, enabled_cnt))
 
-// Premium / Discount gates
-pd_up_ok   = not i_use_pd or in_discount
-pd_dn_ok   = not i_use_pd or in_premium
+// HARD blocks — always enforced regardless of mode (each already self-disables via its toggle)
+hard_ok = (not is_sideways) and vola_ok and session_ok
 
 // ============================================================================
 // SECTION 5 · RISK GATES (daily loss / consecutive losses / cooldown)
@@ -450,26 +463,23 @@ cooldown_ok = na(last_trade_bar) or (bar_index - last_trade_bar) >= i_cooldown
 risk_ok = not daily_loss_hit and not consec_block and cooldown_ok
 
 // ============================================================================
-// SECTION 6 · FINAL SIGNALS  (all gates combined; single-line booleans)
+// SECTION 6 · FINAL SIGNALS  (confluence engine; single-line booleans)
 // ============================================================================
-buy_core  = trend_up and bos_up_ok and ob_up_ok and liq_up_ok
-buy_conf  = mom_bull and vol_bull and htf_up_ok
-buy_filt  = pd_up_ok and not is_sideways and vola_ok and session_ok
-buy_raw   = buy_core and buy_conf and buy_filt
+// Optional direction guard: never buy in a confirmed downtrend (and vice-versa)
+dir_ok_buy  = not i_use_trend or c_trend_up
+dir_ok_sell = not i_use_trend or c_trend_dn
 
-sell_core = trend_dn and bos_dn_ok and ob_dn_ok and liq_dn_ok
-sell_conf = mom_bear and vol_bear and htf_dn_ok
-sell_filt = pd_dn_ok and not is_sideways and vola_ok and session_ok
-sell_raw  = sell_core and sell_conf and sell_filt
+buy_raw   = enabled_cnt > 0 and buy_cnt  >= conf_need and dir_ok_buy
+sell_raw  = enabled_cnt > 0 and sell_cnt >= conf_need and dir_ok_sell
 
-// Block opposite same-bar conflicts and respect risk gates
-buy_signal  = buy_raw  and not sell_raw and risk_ok
-sell_signal = sell_raw and not buy_raw  and risk_ok
+// Block opposite same-bar conflicts, apply hard filters and risk gates
+buy_signal  = buy_raw  and not sell_raw and hard_ok and risk_ok
+sell_signal = sell_raw and not buy_raw  and hard_ok and risk_ok
 
-// Confidence score (transparency / dashboard)
+// Confidence score 0-100 (transparency / dashboard)
 f_b2i(bool c) => c ? 1 : 0
-buy_score = (f_b2i(trend_up)*20 + f_b2i(bos_up_ok)*15 + f_b2i(ob_up_ok)*15 + f_b2i(liq_up_ok)*15 + f_b2i(mom_bull)*10 + f_b2i(vol_bull)*10 + f_b2i(htf_up_ok)*10 + f_b2i(pd_up_ok)*5)
-sell_score= (f_b2i(trend_dn)*20 + f_b2i(bos_dn_ok)*15 + f_b2i(ob_dn_ok)*15 + f_b2i(liq_dn_ok)*15 + f_b2i(mom_bear)*10 + f_b2i(vol_bear)*10 + f_b2i(htf_dn_ok)*10 + f_b2i(pd_dn_ok)*5)
+buy_score = f_b2i(c_trend_up)*20 + f_b2i(c_bos_up)*15 + f_b2i(c_ob_up)*15 + f_b2i(c_liq_up)*15 + f_b2i(c_mom_up)*10 + f_b2i(c_vol_up)*10 + f_b2i(c_htf_up)*10 + f_b2i(c_pd_up)*5
+sell_score= f_b2i(c_trend_dn)*20 + f_b2i(c_bos_dn)*15 + f_b2i(c_ob_dn)*15 + f_b2i(c_liq_dn)*15 + f_b2i(c_mom_dn)*10 + f_b2i(c_vol_dn)*10 + f_b2i(c_htf_dn)*10 + f_b2i(c_pd_dn)*5
 
 // ============================================================================
 // SECTION 7 · SL / TP CALCULATION
