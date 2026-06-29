@@ -1,0 +1,757 @@
+// ============================================================================
+// SMC PRO — Smart Money Concept Strategy
+// Version      : 1.0.0
+// Pine Script  : v6
+// Type         : strategy()  (Strategy-Tester ready)
+// Description  : Institutional-style, NON-REPAINTING multi-confirmation
+//                Smart Money strategy. Combines Market Structure (BOS/CHoCH),
+//                Order Blocks, Fair Value Gaps, Liquidity Sweeps, Premium /
+//                Discount zones, multi-timeframe trend bias, momentum, volume
+//                and a strict SIDEWAYS-MARKET FILTER so signals are produced
+//                ONLY in clean, trending, high-conviction conditions.
+//
+// Anti-repaint : calc_on_every_tick = false  (logic resolves on bar close)
+//                process_orders_on_close = true
+//                request.security() uses lookahead_off + gaps_off
+//                No future-data, no lookahead, signals confirm on close.
+//
+// Markets      : Forex · Crypto · Indices · Gold · Stocks
+// Timeframes   : 1m · 3m · 5m · 15m · 30m · 1H · 4H · D · W
+// ============================================================================
+
+//@version=6
+strategy(title                 = "SMC Pro — Smart Money Strategy",
+         shorttitle            = "SMC PRO",
+         overlay               = true,
+         pyramiding            = 0,
+         initial_capital       = 10000,
+         default_qty_type      = strategy.percent_of_equity,
+         default_qty_value     = 10,
+         commission_type       = strategy.commission.percent,
+         commission_value      = 0.02,
+         slippage              = 1,
+         calc_on_every_tick    = false,
+         process_orders_on_close = true,
+         close_entries_rule    = "ANY",
+         max_labels_count      = 500,
+         max_lines_count       = 500,
+         max_boxes_count       = 250)
+
+// ============================================================================
+// SECTION 1 · INPUTS
+// ============================================================================
+
+// ── 1.1 Trend / EMA ─────────────────────────────────────────────────────────
+gTrend       = "1 · Trend Filter"
+i_ema_fast   = input.int(50,  "Fast EMA Length",  minval=1, group=gTrend)
+i_ema_slow   = input.int(200, "Slow EMA Length",  minval=1, group=gTrend)
+i_use_trend  = input.bool(true, "Enable Trend Filter (EMA + Structure)", group=gTrend)
+i_use_struct = input.bool(true, "Require Trending Market Structure",     group=gTrend)
+
+// ── 1.2 Market Structure / SMC ──────────────────────────────────────────────
+gSMC         = "2 · Market Structure (SMC)"
+i_piv_len    = input.int(5, "Swing Pivot Lookback (bars)", minval=2, maxval=50, group=gSMC)
+i_struct_lkb = input.int(8, "Signal Confluence Lookback (bars)", minval=1, maxval=50, group=gSMC, tooltip="How many bars back a BOS / sweep / FVG can be and still count as confluence.")
+i_use_bos    = input.bool(true, "Require BOS / CHoCH",     group=gSMC)
+i_use_ob     = input.bool(true, "Require Order Block / FVG confluence", group=gSMC)
+i_ob_lkb     = input.int(15, "Order Block search depth (bars)", minval=3, maxval=50, group=gSMC)
+
+// ── 1.3 Fair Value Gap ───────────────────────────────────────────────────────
+gFVG         = "3 · Fair Value Gap"
+i_use_fvg    = input.bool(true, "Use Fair Value Gaps", group=gFVG)
+i_fvg_min_atr= input.float(0.25, "Min FVG size (x ATR)", minval=0.0, step=0.05, group=gFVG)
+
+// ── 1.4 Liquidity ─────────────────────────────────────────────────────────────
+gLiq         = "4 · Liquidity"
+i_use_liq    = input.bool(true, "Require Liquidity Sweep / Stop-Hunt", group=gLiq)
+i_eq_tol_atr = input.float(0.10, "Equal High/Low tolerance (x ATR)", minval=0.0, step=0.05, group=gLiq)
+
+// ── 1.5 Premium / Discount ──────────────────────────────────────────────────
+gPD          = "5 · Premium / Discount"
+i_use_pd     = input.bool(true, "Buy in Discount / Sell in Premium only", group=gPD)
+i_pd_len     = input.int(50, "Dealing-Range Lookback (bars)", minval=5, group=gPD)
+
+// ── 1.6 Higher-Timeframe Bias ──────────────────────────────────────────────
+gHTF         = "6 · Higher-Timeframe Bias"
+i_use_htf    = input.bool(true, "Require HTF Trend Alignment", group=gHTF)
+i_htf        = input.timeframe("60", "HTF (15/30/60/240/D/W)", group=gHTF)
+
+// ── 1.7 Momentum ──────────────────────────────────────────────────────────────
+gMom         = "7 · Momentum"
+i_use_mom    = input.bool(true, "Require Momentum Confirmation", group=gMom)
+i_rsi_len    = input.int(14, "RSI Length", minval=1, group=gMom)
+i_macd_fast  = input.int(12, "MACD Fast",  minval=1, group=gMom)
+i_macd_slow  = input.int(26, "MACD Slow",  minval=1, group=gMom)
+i_macd_sig   = input.int(9,  "MACD Signal",minval=1, group=gMom)
+i_cci_len    = input.int(20, "CCI Length", minval=1, group=gMom)
+i_mom_len    = input.int(10, "Momentum Length", minval=1, group=gMom)
+i_mom_min    = input.int(2,  "Min momentum confirmations (of 4)", minval=1, maxval=4, group=gMom)
+
+// ── 1.8 Volume ──────────────────────────────────────────────────────────────
+gVol         = "8 · Volume"
+i_use_vol    = input.bool(true, "Require Volume Confirmation", group=gVol)
+i_vol_len    = input.int(20, "Volume Average Length", minval=1, group=gVol)
+i_vol_mult   = input.float(1.3, "Relative-Volume Threshold (x avg)", minval=0.1, step=0.1, group=gVol)
+
+// ── 1.9 Volatility Filter ─────────────────────────────────────────────────────
+gAtr         = "9 · Volatility (ATR)"
+i_atr_len    = input.int(14, "ATR Length", minval=1, group=gAtr)
+i_atr_avg    = input.int(50, "ATR Average Length", minval=1, group=gAtr)
+i_use_vola   = input.bool(true, "Reject tiny / extreme volatility", group=gAtr)
+i_atr_lo     = input.float(0.6, "Min ATR ratio (atr / avg)", minval=0.0, step=0.1, group=gAtr)
+i_atr_hi     = input.float(3.0, "Max ATR ratio (atr / avg)", minval=0.5, step=0.1, group=gAtr)
+
+// ── 1.10 SIDEWAYS / RANGE FILTER ───────────────────────────────────────────
+gRange       = "10 · Sideways-Market Filter"
+i_use_range  = input.bool(true, "Block signals in ranging markets", group=gRange)
+i_range_min  = input.int(3, "Min range-signals to call RANGING (of 6)", minval=1, maxval=6, group=gRange)
+i_adx_len    = input.int(14, "ADX Length", minval=1, group=gRange)
+i_adx_min    = input.float(22, "ADX Trend Threshold", minval=1, group=gRange)
+i_chop_len   = input.int(14, "Choppiness Index Length", minval=2, group=gRange)
+i_chop_max   = input.float(55, "Choppiness Ranging Threshold (>)", minval=1, group=gRange)
+i_bb_len     = input.int(20, "Bollinger Length", minval=2, group=gRange)
+i_bb_mult    = input.float(2.0, "Bollinger StdDev", minval=0.1, step=0.1, group=gRange)
+i_bbw_min    = input.float(2.0, "Min BB Width % (squeeze below)", minval=0.0, step=0.1, group=gRange)
+i_dc_len     = input.int(20, "Donchian Length", minval=2, group=gRange)
+i_dcw_min    = input.float(1.5, "Min Donchian Width % (narrow below)", minval=0.0, step=0.1, group=gRange)
+i_atr_comp   = input.float(0.8, "ATR Compression factor (atr < avg x)", minval=0.1, step=0.05, group=gRange)
+i_flat_len   = input.int(5, "Flat-EMA slope lookback", minval=1, group=gRange)
+i_flat_min   = input.float(0.05, "Min EMA slope % (flat below)", minval=0.0, step=0.01, group=gRange)
+
+// ── 1.11 Session Filter ───────────────────────────────────────────────────────
+gSess        = "11 · Session Filter"
+i_use_sess   = input.bool(false, "Restrict to selected sessions", group=gSess)
+i_sess_lon   = input.bool(true,  "London",   group=gSess)
+i_sess_ny    = input.bool(true,  "New York", group=gSess)
+i_sess_tok   = input.bool(false, "Tokyo",    group=gSess)
+i_sess_lon_t = input.session("0700-1600", "London Session (exch tz)",   group=gSess)
+i_sess_ny_t  = input.session("1200-2100", "New York Session (exch tz)", group=gSess)
+i_sess_tok_t = input.session("0000-0900", "Tokyo Session (exch tz)",    group=gSess)
+
+// ── 1.12 Stop Loss ────────────────────────────────────────────────────────────
+gSL          = "12 · Stop Loss"
+i_sl_method  = input.string("ATR", "SL Method", options=["ATR","Swing","Order Block","Fixed %"], group=gSL)
+i_sl_atr     = input.float(1.5, "SL ATR Multiplier", minval=0.1, step=0.1, group=gSL)
+i_sl_pct     = input.float(1.0, "SL Fixed %", minval=0.05, step=0.05, group=gSL)
+i_sl_buf_atr = input.float(0.2, "SL buffer beyond swing/OB (x ATR)", minval=0.0, step=0.05, group=gSL)
+
+// ── 1.13 Take Profit ──────────────────────────────────────────────────────────
+gTP          = "13 · Take Profit"
+i_tp_method  = input.string("Risk Reward", "TP Method", options=["Risk Reward","ATR","Liquidity","Fixed %"], group=gTP)
+i_rr         = input.float(2.0, "Risk : Reward", options=[1.0,1.5,2.0,2.5,3.0,4.0], group=gTP)
+i_tp_atr     = input.float(3.0, "TP ATR Multiplier", minval=0.1, step=0.1, group=gTP)
+i_tp_pct     = input.float(2.0, "TP Fixed %", minval=0.05, step=0.05, group=gTP)
+
+// ── 1.14 Trailing / Break-Even ──────────────────────────────────────────────
+gTrail       = "14 · Trailing & Break-Even"
+i_use_trail  = input.bool(false, "Enable ATR Trailing Stop", group=gTrail)
+i_trail_atr  = input.float(2.0, "Trail Distance (x ATR)", minval=0.1, step=0.1, group=gTrail)
+i_trail_start= input.float(1.0, "Activate trail after R reached", minval=0.1, step=0.1, group=gTrail)
+i_use_be     = input.bool(true,  "Move SL to Break-Even", group=gTrail)
+i_be_trigger = input.float(1.0,  "Break-Even after R reached", minval=0.1, step=0.1, group=gTrail)
+
+// ── 1.15 Risk Management ─────────────────────────────────────────────────────
+gRisk        = "15 · Risk Management"
+i_risk_mode  = input.string("Risk %", "Position Sizing", options=["Risk %","Fixed Qty"], group=gRisk)
+i_risk_pct   = input.float(1.0, "Risk per Trade %", minval=0.05, step=0.05, group=gRisk)
+i_fixed_qty  = input.float(1.0, "Fixed Quantity", minval=0.0, step=0.1, group=gRisk)
+i_max_dd_day = input.float(5.0, "Max Daily Loss % (block new trades)", minval=0.1, step=0.1, group=gRisk)
+i_max_consec = input.int(3, "Max Consecutive Losses", minval=1, group=gRisk)
+i_cooldown   = input.int(3, "Cooldown bars between trades", minval=0, group=gRisk)
+i_one_dir    = input.bool(true, "One trade per direction (no stacking)", group=gRisk)
+
+// ── 1.16 Display ──────────────────────────────────────────────────────────────
+gDisp        = "16 · Display"
+i_show_dash  = input.bool(true,  "Show Dashboard",          group=gDisp)
+i_show_draw  = input.bool(true,  "Show Chart Drawings",     group=gDisp)
+i_show_ema   = input.bool(true,  "Show EMA Lines",          group=gDisp)
+i_show_ob    = input.bool(true,  "Show Order Blocks",       group=gDisp)
+i_show_fvg   = input.bool(true,  "Show Fair Value Gaps",    group=gDisp)
+i_show_sltp  = input.bool(true,  "Show SL / TP Lines",      group=gDisp)
+i_show_pd    = input.bool(true,  "Show Premium/Discount",   group=gDisp)
+i_dark       = input.bool(true,  "Dark Theme",              group=gDisp)
+
+// ============================================================================
+// SECTION 2 · THEME
+// ============================================================================
+c_text   = i_dark ? color.new(#e6edf3, 0) : color.new(#1a1a2e, 0)
+c_bull    = color.new(#00e676, 0)
+c_bear    = color.new(#ff5252, 0)
+c_neutral = color.new(#90a4ae, 0)
+c_accent  = color.new(#42a5f5, 0)
+c_warn    = color.new(#ffb300, 0)
+c_panel   = i_dark ? color.new(#0d1117, 10) : color.new(#f5f7fa, 5)
+c_row     = i_dark ? color.new(#161b22, 15) : color.new(#ffffff, 5)
+
+// ============================================================================
+// SECTION 3 · CORE CALCULATIONS  (resolve on confirmed bars only)
+// ============================================================================
+
+// ── 3.1 ATR / Volatility ─────────────────────────────────────────────────────
+atr_val  = ta.atr(i_atr_len)
+atr_avg  = ta.sma(atr_val, i_atr_avg)
+atr_ratio= atr_avg > 0 ? atr_val / atr_avg : 1.0
+vola_ok  = not i_use_vola or (atr_ratio >= i_atr_lo and atr_ratio <= i_atr_hi)
+
+// ── 3.2 EMA Trend ─────────────────────────────────────────────────────────────
+ema_fast = ta.ema(close, i_ema_fast)
+ema_slow = ta.ema(close, i_ema_slow)
+ema_bull = ema_fast > ema_slow and close > ema_fast
+ema_bear = ema_fast < ema_slow and close < ema_fast
+
+// ── 3.3 Swing Structure ───────────────────────────────────────────────────────
+// Pivots confirm i_piv_len bars AFTER the pivot bar => fully non-repainting.
+ph = ta.pivothigh(high, i_piv_len, i_piv_len)
+pl = ta.pivotlow(low,  i_piv_len, i_piv_len)
+
+var float last_sh = na
+var float prev_sh = na
+var float last_sl = na
+var float prev_sl = na
+var int   last_sh_bar = na
+var int   last_sl_bar = na
+
+if not na(ph)
+    prev_sh := last_sh
+    last_sh := ph
+    last_sh_bar := bar_index - i_piv_len
+if not na(pl)
+    prev_sl := last_sl
+    last_sl := pl
+    last_sl_bar := bar_index - i_piv_len
+
+hh = not na(last_sh) and not na(prev_sh) and last_sh > prev_sh
+hl = not na(last_sl) and not na(prev_sl) and last_sl > prev_sl
+lh = not na(last_sh) and not na(prev_sh) and last_sh < prev_sh
+ll = not na(last_sl) and not na(prev_sl) and last_sl < prev_sl
+
+ms_bull = hh and hl
+ms_bear = lh and ll
+
+// ── 3.4 Break of Structure (BOS) ──────────────────────────────────────────────
+// Confirmed close beyond the most recent confirmed swing.
+bos_bull = not na(last_sh) and close > last_sh and close[1] <= last_sh
+bos_bear = not na(last_sl) and close < last_sl and close[1] >= last_sl
+
+// ── 3.5 Change of Character (CHoCH) ─────────────────────────────────────────
+// First structural break against the prevailing structure.
+choch_bull = bos_bull and ms_bear
+choch_bear = bos_bear and ms_bull
+
+// Directional structure event (BOS or CHoCH)
+struct_evt_bull = bos_bull or choch_bull
+struct_evt_bear = bos_bear or choch_bear
+
+// ── 3.6 Liquidity ───────────────────────────────────────────────────────────
+// Equal highs / lows (resting liquidity)
+eq_tol   = i_eq_tol_atr * atr_val
+eq_high  = not na(last_sh) and not na(prev_sh) and math.abs(last_sh - prev_sh) <= eq_tol
+eq_low   = not na(last_sl) and not na(prev_sl) and math.abs(last_sl - prev_sl) <= eq_tol
+
+// Liquidity sweep / stop-hunt: wick takes a swing then closes back inside.
+liq_sweep_dn = not na(last_sl) and low  < last_sl and close > last_sl   // sell-side grab -> bullish
+liq_sweep_up = not na(last_sh) and high > last_sh and close < last_sh   // buy-side grab  -> bearish
+
+// ── 3.7 Fair Value Gap ─────────────────────────────────────────────────────
+// 3-candle imbalance, validated on the CLOSED middle bar [1].
+fvg_bull_raw = low[0] > high[2]
+fvg_bear_raw = high[0] < low[2]
+fvg_bull_sz  = fvg_bull_raw ? (low[0] - high[2]) : 0.0
+fvg_bear_sz  = fvg_bear_raw ? (low[2] - high[0]) : 0.0
+fvg_bull     = i_use_fvg and fvg_bull_raw and fvg_bull_sz >= i_fvg_min_atr * atr_val
+fvg_bear     = i_use_fvg and fvg_bear_raw and fvg_bear_sz >= i_fvg_min_atr * atr_val
+
+// ── 3.8 Order Blocks ───────────────────────────────────────────────────────
+// On a bullish structure event, the last down-candle before the impulse
+// becomes the bullish OB (and vice-versa). Scanned over i_ob_lkb bars.
+f_find_ob(bool wantBull) =>
+    float t = na
+    float b = na
+    int   idx = na
+    for k = 1 to i_ob_lkb
+        bearCandle = close[k] < open[k]
+        bullCandle = close[k] > open[k]
+        if wantBull and bearCandle and na(t)
+            t := high[k]
+            b := low[k]
+            idx := bar_index - k
+        if (not wantBull) and bullCandle and na(t)
+            t := high[k]
+            b := low[k]
+            idx := bar_index - k
+    [t, b, idx]
+
+var float bull_ob_top = na
+var float bull_ob_bot = na
+var float bear_ob_top = na
+var float bear_ob_bot = na
+var bool  bull_ob_active = false
+var bool  bear_ob_active = false
+
+if struct_evt_bull
+    [t, b, _i] = f_find_ob(true)
+    if not na(b)
+        bull_ob_top := t
+        bull_ob_bot := b
+        bull_ob_active := true
+if struct_evt_bear
+    [t, b, _i] = f_find_ob(false)
+    if not na(b)
+        bear_ob_top := t
+        bear_ob_bot := b
+        bear_ob_active := true
+
+// Invalidate OB once price closes fully through it (mitigated / broken)
+if bull_ob_active and not na(bull_ob_bot) and close < bull_ob_bot
+    bull_ob_active := false
+if bear_ob_active and not na(bear_ob_top) and close > bear_ob_top
+    bear_ob_active := false
+
+// Price currently interacting with (retesting) the order block
+in_bull_ob = bull_ob_active and not na(bull_ob_bot) and low  <= bull_ob_top and high >= bull_ob_bot
+in_bear_ob = bear_ob_active and not na(bear_ob_top) and high >= bear_ob_bot and low  <= bear_ob_top
+
+// ── 3.9 Premium / Discount (dealing range) ──────────────────────────────────
+range_hi = ta.highest(high, i_pd_len)
+range_lo = ta.lowest(low,  i_pd_len)
+range_eq = (range_hi + range_lo) / 2.0
+in_discount = close <= range_eq
+in_premium  = close >= range_eq
+
+// ── 3.10 Momentum ───────────────────────────────────────────────────────────
+rsi_val  = ta.rsi(close, i_rsi_len)
+[macd_line, macd_sig_line, macd_hist] = ta.macd(close, i_macd_fast, i_macd_slow, i_macd_sig)
+cci_val  = ta.cci(close, i_cci_len)
+mom_val  = ta.mom(close, i_mom_len)
+
+mom_bull_cnt = (rsi_val > 50 and rsi_val < 72 ? 1 : 0) + (macd_line > macd_sig_line and macd_hist > 0 ? 1 : 0) + (cci_val > 0 ? 1 : 0) + (mom_val > 0 ? 1 : 0)
+mom_bear_cnt = (rsi_val < 50 and rsi_val > 28 ? 1 : 0) + (macd_line < macd_sig_line and macd_hist < 0 ? 1 : 0) + (cci_val < 0 ? 1 : 0) + (mom_val < 0 ? 1 : 0)
+mom_bull = not i_use_mom or mom_bull_cnt >= i_mom_min
+mom_bear = not i_use_mom or mom_bear_cnt >= i_mom_min
+
+// ── 3.11 Volume ─────────────────────────────────────────────────────────────
+vol_sma  = ta.sma(volume, i_vol_len)
+rel_vol  = vol_sma > 0 ? volume / vol_sma : 1.0
+vol_spike= volume >= vol_sma * i_vol_mult
+obv_val  = ta.obv
+obv_ema  = ta.ema(obv_val, i_vol_len)
+obv_rising = obv_val > obv_ema
+obv_falling= obv_val < obv_ema
+vol_bull = not i_use_vol or (vol_spike and obv_rising)
+vol_bear = not i_use_vol or (vol_spike and obv_falling)
+
+// ── 3.12 ADX / DMI (manual, v6-safe) ───────────────────────────────────────
+up_move  = high - high[1]
+dn_move  = low[1] - low
+plus_dm  = up_move > dn_move and up_move > 0 ? up_move : 0.0
+minus_dm = dn_move > up_move and dn_move > 0 ? dn_move : 0.0
+tr_rma   = ta.rma(ta.tr(true), i_adx_len)
+plus_di  = tr_rma > 0 ? 100 * ta.rma(plus_dm,  i_adx_len) / tr_rma : 0.0
+minus_di = tr_rma > 0 ? 100 * ta.rma(minus_dm, i_adx_len) / tr_rma : 0.0
+di_sum   = plus_di + minus_di
+dx       = di_sum > 0 ? 100 * math.abs(plus_di - minus_di) / di_sum : 0.0
+adx_val  = ta.rma(dx, i_adx_len)
+
+// ── 3.13 Choppiness Index ───────────────────────────────────────────────────
+chop_hi  = ta.highest(high, i_chop_len)
+chop_lo  = ta.lowest(low,  i_chop_len)
+chop_sum = math.sum(ta.tr(true), i_chop_len)
+chop_rng = chop_hi - chop_lo
+chop_idx = chop_rng > 0 ? 100 * math.log10(chop_sum / chop_rng) / math.log10(i_chop_len) : 0.0
+
+// ── 3.14 Bollinger Band Width ───────────────────────────────────────────────
+bb_basis = ta.sma(close, i_bb_len)
+bb_dev   = i_bb_mult * ta.stdev(close, i_bb_len)
+bb_width = bb_basis > 0 ? (2 * bb_dev) / bb_basis * 100 : 0.0
+
+// ── 3.15 Donchian Width ─────────────────────────────────────────────────────
+dc_hi    = ta.highest(high, i_dc_len)
+dc_lo    = ta.lowest(low,  i_dc_len)
+dc_width = close > 0 ? (dc_hi - dc_lo) / close * 100 : 0.0
+
+// ── 3.16 Flat-EMA slope ──────────────────────────────────────────────────────
+ema_slope = ema_slow > 0 ? math.abs(ema_slow - ema_slow[i_flat_len]) / ema_slow * 100 : 0.0
+ema_flat  = ema_slope < i_flat_min
+
+// ── 3.17 SIDEWAYS DETECTION ─────────────────────────────────────────────────
+r1 = adx_val   < i_adx_min   ? 1 : 0   // weak trend
+r2 = chop_idx  > i_chop_max  ? 1 : 0   // high choppiness
+r3 = bb_width  < i_bbw_min   ? 1 : 0   // BB squeeze
+r4 = dc_width  < i_dcw_min   ? 1 : 0   // narrow Donchian
+r5 = atr_val   < atr_avg * i_atr_comp ? 1 : 0   // ATR compression
+r6 = ema_flat                ? 1 : 0   // flat EMA
+range_score = r1 + r2 + r3 + r4 + r5 + r6
+is_sideways = i_use_range and range_score >= i_range_min
+
+// ── 3.18 Higher-Timeframe Bias (non-repaint) ────────────────────────────────
+[htf_ef, htf_es, htf_c] = request.security(syminfo.tickerid, i_htf, [ta.ema(close, i_ema_fast), ta.ema(close, i_ema_slow), close], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+htf_bull = htf_c > htf_es and htf_ef > htf_es
+htf_bear = htf_c < htf_es and htf_ef < htf_es
+
+// ── 3.19 Session Filter ──────────────────────────────────────────────────────
+in_lon = i_sess_lon and not na(time(timeframe.period, i_sess_lon_t))
+in_ny  = i_sess_ny  and not na(time(timeframe.period, i_sess_ny_t))
+in_tok = i_sess_tok and not na(time(timeframe.period, i_sess_tok_t))
+session_ok = not i_use_sess or in_lon or in_ny or in_tok
+
+// ============================================================================
+// SECTION 4 · CONFLUENCE GATES
+// ============================================================================
+bars_bos_bull   = nz(ta.barssince(struct_evt_bull), 100000)
+bars_bos_bear   = nz(ta.barssince(struct_evt_bear), 100000)
+bars_sweep_bull = nz(ta.barssince(liq_sweep_dn),    100000)
+bars_sweep_bear = nz(ta.barssince(liq_sweep_up),    100000)
+bars_fvg_bull   = nz(ta.barssince(fvg_bull),        100000)
+bars_fvg_bear   = nz(ta.barssince(fvg_bear),        100000)
+
+// Trend gates
+trend_up   = not i_use_trend or (ema_bull and (not i_use_struct or ms_bull or struct_evt_bull))
+trend_dn   = not i_use_trend or (ema_bear and (not i_use_struct or ms_bear or struct_evt_bear))
+
+// Structure gates
+bos_up_ok  = not i_use_bos or bars_bos_bull <= i_struct_lkb
+bos_dn_ok  = not i_use_bos or bars_bos_bear <= i_struct_lkb
+
+// Order Block / FVG gates
+ob_up_ok   = not i_use_ob or in_bull_ob or bars_fvg_bull <= i_struct_lkb
+ob_dn_ok   = not i_use_ob or in_bear_ob or bars_fvg_bear <= i_struct_lkb
+
+// Liquidity gates
+liq_up_ok  = not i_use_liq or bars_sweep_bull <= i_struct_lkb
+liq_dn_ok  = not i_use_liq or bars_sweep_bear <= i_struct_lkb
+
+// HTF gates
+htf_up_ok  = not i_use_htf or htf_bull
+htf_dn_ok  = not i_use_htf or htf_bear
+
+// Premium / Discount gates
+pd_up_ok   = not i_use_pd or in_discount
+pd_dn_ok   = not i_use_pd or in_premium
+
+// ============================================================================
+// SECTION 5 · RISK GATES (daily loss / consecutive losses / cooldown)
+// ============================================================================
+var float day_start_eq = na
+new_day = ta.change(time("D")) != 0
+if na(day_start_eq) or new_day
+    day_start_eq := strategy.equity
+daily_pnl_pct = day_start_eq > 0 ? (strategy.equity - day_start_eq) / day_start_eq * 100 : 0.0
+daily_loss_hit = daily_pnl_pct <= -i_max_dd_day
+
+var int consec_losses = 0
+if strategy.closedtrades > nz(strategy.closedtrades[1])
+    last_profit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    consec_losses := last_profit < 0 ? consec_losses + 1 : 0
+consec_block = consec_losses >= i_max_consec
+
+var int last_trade_bar = na
+cooldown_ok = na(last_trade_bar) or (bar_index - last_trade_bar) >= i_cooldown
+
+risk_ok = not daily_loss_hit and not consec_block and cooldown_ok
+
+// ============================================================================
+// SECTION 6 · FINAL SIGNALS  (all gates combined; single-line booleans)
+// ============================================================================
+buy_core  = trend_up and bos_up_ok and ob_up_ok and liq_up_ok
+buy_conf  = mom_bull and vol_bull and htf_up_ok
+buy_filt  = pd_up_ok and not is_sideways and vola_ok and session_ok
+buy_raw   = buy_core and buy_conf and buy_filt
+
+sell_core = trend_dn and bos_dn_ok and ob_dn_ok and liq_dn_ok
+sell_conf = mom_bear and vol_bear and htf_dn_ok
+sell_filt = pd_dn_ok and not is_sideways and vola_ok and session_ok
+sell_raw  = sell_core and sell_conf and sell_filt
+
+// Block opposite same-bar conflicts and respect risk gates
+buy_signal  = buy_raw  and not sell_raw and risk_ok
+sell_signal = sell_raw and not buy_raw  and risk_ok
+
+// Confidence score (transparency / dashboard)
+f_b2i(bool c) => c ? 1 : 0
+buy_score = (f_b2i(trend_up)*20 + f_b2i(bos_up_ok)*15 + f_b2i(ob_up_ok)*15 + f_b2i(liq_up_ok)*15 + f_b2i(mom_bull)*10 + f_b2i(vol_bull)*10 + f_b2i(htf_up_ok)*10 + f_b2i(pd_up_ok)*5)
+sell_score= (f_b2i(trend_dn)*20 + f_b2i(bos_dn_ok)*15 + f_b2i(ob_dn_ok)*15 + f_b2i(liq_dn_ok)*15 + f_b2i(mom_bear)*10 + f_b2i(vol_bear)*10 + f_b2i(htf_dn_ok)*10 + f_b2i(pd_dn_ok)*5)
+
+// ============================================================================
+// SECTION 7 · SL / TP CALCULATION
+// ============================================================================
+f_long_sl(float entry) =>
+    float sl = na
+    if i_sl_method == "ATR"
+        sl := entry - i_sl_atr * atr_val
+    else if i_sl_method == "Swing"
+        sl := (not na(last_sl) ? last_sl : entry - i_sl_atr * atr_val) - i_sl_buf_atr * atr_val
+    else if i_sl_method == "Order Block"
+        sl := (bull_ob_active and not na(bull_ob_bot) ? bull_ob_bot : entry - i_sl_atr * atr_val) - i_sl_buf_atr * atr_val
+    else
+        sl := entry * (1 - i_sl_pct / 100)
+    // Safety: SL must sit below entry
+    sl := sl >= entry ? entry - i_sl_atr * atr_val : sl
+    sl
+
+f_short_sl(float entry) =>
+    float sl = na
+    if i_sl_method == "ATR"
+        sl := entry + i_sl_atr * atr_val
+    else if i_sl_method == "Swing"
+        sl := (not na(last_sh) ? last_sh : entry + i_sl_atr * atr_val) + i_sl_buf_atr * atr_val
+    else if i_sl_method == "Order Block"
+        sl := (bear_ob_active and not na(bear_ob_top) ? bear_ob_top : entry + i_sl_atr * atr_val) + i_sl_buf_atr * atr_val
+    else
+        sl := entry * (1 + i_sl_pct / 100)
+    sl := sl <= entry ? entry + i_sl_atr * atr_val : sl
+    sl
+
+f_long_tp(float entry, float sl) =>
+    risk = entry - sl
+    float tp = na
+    if i_tp_method == "Risk Reward"
+        tp := entry + i_rr * risk
+    else if i_tp_method == "ATR"
+        tp := entry + i_tp_atr * atr_val
+    else if i_tp_method == "Liquidity"
+        tp := math.max(range_hi, entry + i_rr * risk)
+    else
+        tp := entry * (1 + i_tp_pct / 100)
+    tp := tp <= entry ? entry + i_rr * risk : tp
+    tp
+
+f_short_tp(float entry, float sl) =>
+    risk = sl - entry
+    float tp = na
+    if i_tp_method == "Risk Reward"
+        tp := entry - i_rr * risk
+    else if i_tp_method == "ATR"
+        tp := entry - i_tp_atr * atr_val
+    else if i_tp_method == "Liquidity"
+        tp := math.min(range_lo, entry - i_rr * risk)
+    else
+        tp := entry * (1 - i_tp_pct / 100)
+    tp := tp >= entry ? entry - i_rr * risk : tp
+    tp
+
+// ============================================================================
+// SECTION 8 · POSITION SIZING
+// ============================================================================
+f_qty(float entry, float sl) =>
+    risk_per_unit = math.abs(entry - sl)
+    float q = i_fixed_qty
+    if i_risk_mode == "Risk %" and risk_per_unit > 0
+        risk_cash = strategy.equity * i_risk_pct / 100
+        q := risk_cash / risk_per_unit
+    q := q <= 0 ? na : q
+    q
+
+// ============================================================================
+// SECTION 9 · ORDER MANAGEMENT
+// ============================================================================
+var float pos_entry = na
+var float pos_sl     = na
+var float pos_tp     = na
+var float pos_init_sl= na
+var bool  be_done    = false
+var bool  trail_on   = false
+
+flat = strategy.position_size == 0
+
+// ── Entries ──────────────────────────────────────────────────────────────────
+// With one-trade-per-direction (default), enter only when flat or reversing.
+enterLong  = buy_signal  and (flat or strategy.position_size < 0)
+enterShort = sell_signal and (flat or strategy.position_size > 0)
+
+if enterLong
+    e  = close
+    sl = f_long_sl(e)
+    tp = f_long_tp(e, sl)
+    q  = f_qty(e, sl)
+    if not na(q)
+        strategy.entry("Long", strategy.long, qty=q)
+        pos_entry := e
+        pos_sl     := sl
+        pos_init_sl:= sl
+        pos_tp     := tp
+        be_done    := false
+        trail_on   := false
+        last_trade_bar := bar_index
+
+if enterShort
+    e  = close
+    sl = f_short_sl(e)
+    tp = f_short_tp(e, sl)
+    q  = f_qty(e, sl)
+    if not na(q)
+        strategy.entry("Short", strategy.short, qty=q)
+        pos_entry := e
+        pos_sl     := sl
+        pos_init_sl:= sl
+        pos_tp     := tp
+        be_done    := false
+        trail_on   := false
+        last_trade_bar := bar_index
+
+// ── Break-Even & Trailing management (updates live SL) ──────────────────────
+if strategy.position_size > 0 and not na(pos_entry)
+    risk = pos_entry - pos_init_sl
+    if risk > 0
+        if i_use_be and not be_done and high >= pos_entry + i_be_trigger * risk
+            pos_sl  := math.max(pos_sl, pos_entry)
+            be_done := true
+        if i_use_trail and high >= pos_entry + i_trail_start * risk
+            trail_on := true
+        if trail_on
+            pos_sl := math.max(pos_sl, high - i_trail_atr * atr_val)
+
+if strategy.position_size < 0 and not na(pos_entry)
+    risk = pos_init_sl - pos_entry
+    if risk > 0
+        if i_use_be and not be_done and low <= pos_entry - i_be_trigger * risk
+            pos_sl  := math.min(pos_sl, pos_entry)
+            be_done := true
+        if i_use_trail and low <= pos_entry - i_trail_start * risk
+            trail_on := true
+        if trail_on
+            pos_sl := math.min(pos_sl, low + i_trail_atr * atr_val)
+
+// ── Exits ──────────────────────────────────────────────────────────────────
+if strategy.position_size > 0 and not na(pos_sl) and not na(pos_tp)
+    strategy.exit("Exit L", from_entry="Long", stop=pos_sl, limit=pos_tp)
+if strategy.position_size < 0 and not na(pos_sl) and not na(pos_tp)
+    strategy.exit("Exit S", from_entry="Short", stop=pos_sl, limit=pos_tp)
+
+// Reset trackers when flat
+if flat
+    pos_entry := na
+    pos_sl     := na
+    pos_tp     := na
+    pos_init_sl:= na
+
+// Live R:R for dashboard
+rr_live = not na(pos_entry) and not na(pos_sl) and not na(pos_tp) and math.abs(pos_entry - pos_init_sl) > 0 ? math.abs(pos_tp - pos_entry) / math.abs(pos_entry - pos_init_sl) : na
+
+// ============================================================================
+// SECTION 10 · CHART DRAWINGS
+// ============================================================================
+draw_on = i_show_draw
+
+// ── EMA lines ────────────────────────────────────────────────────────────────
+plot(i_show_ema and draw_on ? ema_fast : na, "EMA Fast", color=c_accent, linewidth=1)
+plot(i_show_ema and draw_on ? ema_slow : na, "EMA Slow", color=c_warn,   linewidth=2)
+
+// ── Trend background ─────────────────────────────────────────────────────────
+bgcolor(is_sideways ? color.new(#90a4ae, 90) : ema_bull ? color.new(#00e676, 95) : ema_bear ? color.new(#ff5252, 95) : na, title="Market State BG")
+
+// ── BUY / SELL markers ──────────────────────────────────────────────────────
+plotshape(draw_on and buy_signal,  title="BUY",  style=shape.triangleup,   location=location.belowbar, color=c_bull, size=size.normal, text="BUY",  textcolor=color.white)
+plotshape(draw_on and sell_signal, title="SELL", style=shape.triangledown, location=location.abovebar, color=c_bear, size=size.normal, text="SELL", textcolor=color.white)
+
+// ── BOS / CHoCH labels ──────────────────────────────────────────────────────
+if draw_on and bos_bull and not choch_bull
+    label.new(bar_index, low - atr_val, "BOS", color=color.new(#00e676, 20), textcolor=color.white, style=label.style_label_up, size=size.tiny)
+if draw_on and bos_bear and not choch_bear
+    label.new(bar_index, high + atr_val, "BOS", color=color.new(#ff5252, 20), textcolor=color.white, style=label.style_label_down, size=size.tiny)
+if draw_on and choch_bull
+    label.new(bar_index, low - atr_val * 1.4, "CHoCH", color=c_accent, textcolor=color.white, style=label.style_label_up, size=size.tiny)
+if draw_on and choch_bear
+    label.new(bar_index, high + atr_val * 1.4, "CHoCH", color=c_warn, textcolor=color.black, style=label.style_label_down, size=size.tiny)
+
+// ── Liquidity sweep markers ─────────────────────────────────────────────────
+plotshape(draw_on and liq_sweep_dn, title="Sell-Side Sweep", style=shape.xcross, location=location.belowbar, color=c_accent, size=size.tiny)
+plotshape(draw_on and liq_sweep_up, title="Buy-Side Sweep",  style=shape.xcross, location=location.abovebar, color=c_warn,   size=size.tiny)
+
+// ── Equal high / low markers ────────────────────────────────────────────────
+plotchar(draw_on and eq_high, title="Equal Highs", char="=", location=location.abovebar, color=c_neutral, size=size.tiny)
+plotchar(draw_on and eq_low,  title="Equal Lows",  char="=", location=location.belowbar, color=c_neutral, size=size.tiny)
+
+// ── Fair Value Gap boxes (drawn on confirmed middle bar) ────────────────────
+if draw_on and i_show_fvg and fvg_bull
+    box.new(bar_index - 2, low[0], bar_index + 6, high[2], border_color=color.new(#00e676, 60), bgcolor=color.new(#00e676, 90))
+if draw_on and i_show_fvg and fvg_bear
+    box.new(bar_index - 2, low[2], bar_index + 6, high[0], border_color=color.new(#ff5252, 60), bgcolor=color.new(#ff5252, 90))
+
+// ── Order Block boxes ────────────────────────────────────────────────────────
+if draw_on and i_show_ob and struct_evt_bull and bull_ob_active and not na(bull_ob_bot)
+    box.new(bar_index, bull_ob_top, bar_index + 8, bull_ob_bot, border_color=color.new(#00e676, 40), bgcolor=color.new(#00e676, 85))
+if draw_on and i_show_ob and struct_evt_bear and bear_ob_active and not na(bear_ob_top)
+    box.new(bar_index, bear_ob_top, bar_index + 8, bear_ob_bot, border_color=color.new(#ff5252, 40), bgcolor=color.new(#ff5252, 85))
+
+// ── Premium / Discount zone ──────────────────────────────────────────────────
+plot(draw_on and i_show_pd ? range_eq : na, "Equilibrium", color=color.new(#90a4ae, 30), linewidth=1, style=plot.style_linebr)
+
+// ── SL / TP lines for active position ───────────────────────────────────────
+plot(draw_on and i_show_sltp and strategy.position_size != 0 ? pos_sl : na, "Stop Loss",   color=c_bear, linewidth=1, style=plot.style_linebr)
+plot(draw_on and i_show_sltp and strategy.position_size != 0 ? pos_tp : na, "Take Profit", color=c_bull, linewidth=1, style=plot.style_linebr)
+plot(draw_on and i_show_sltp and strategy.position_size != 0 ? pos_entry : na, "Entry",     color=c_accent, linewidth=1, style=plot.style_linebr)
+
+// ── "RANGING MARKET" banner ─────────────────────────────────────────────────
+if draw_on and is_sideways and barstate.islast
+    label.new(bar_index, high, "⚠ RANGING MARKET — NO TRADES", color=color.new(#90a4ae, 10), textcolor=color.white, style=label.style_label_down, size=size.large)
+
+// ============================================================================
+// SECTION 11 · DASHBOARD
+// ============================================================================
+f_row(table t, int r, string l, string v, color vc) =>
+    table.cell(t, 0, r, l, text_color=c_text, text_size=size.small, text_halign=text.align_left,  bgcolor=c_row)
+    table.cell(t, 1, r, v, text_color=vc,     text_size=size.small, text_halign=text.align_right, bgcolor=c_row)
+
+win_rate = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100 : 0.0
+prof_fac = strategy.grossloss > 0 ? strategy.grossprofit / strategy.grossloss : na
+
+if i_show_dash and barstate.islast
+    var table dash = table.new(position.top_right, 2, 21, bgcolor=c_panel, border_width=1, border_color=color.new(#30363d, 50), frame_width=2, frame_color=color.new(#42a5f5, 40))
+
+    table.cell(dash, 0, 0, "⚡ SMC PRO STRATEGY", text_color=c_accent, text_size=size.normal, bgcolor=color.new(#161b22, 0), text_halign=text.align_center)
+    table.merge_cells(dash, 0, 0, 1, 0)
+
+    mkt_txt = is_sideways ? "RANGING ▬" : ema_bull ? "TRENDING ▲" : ema_bear ? "TRENDING ▼" : "NEUTRAL"
+    mkt_col = is_sideways ? c_neutral : ema_bull ? c_bull : ema_bear ? c_bear : c_neutral
+    f_row(dash, 1, "Market State", mkt_txt, mkt_col)
+
+    bias_txt = ema_bull ? "BULLISH" : ema_bear ? "BEARISH" : "NEUTRAL"
+    f_row(dash, 2, "LTF Bias", bias_txt, ema_bull ? c_bull : ema_bear ? c_bear : c_neutral)
+    f_row(dash, 3, "HTF Bias (" + i_htf + ")", htf_bull ? "BULLISH" : htf_bear ? "BEARISH" : "NEUTRAL", htf_bull ? c_bull : htf_bear ? c_bear : c_neutral)
+    f_row(dash, 4, "Structure", ms_bull ? "HH/HL ▲" : ms_bear ? "LH/LL ▼" : "MIXED", ms_bull ? c_bull : ms_bear ? c_bear : c_neutral)
+    f_row(dash, 5, "Last Event", bars_bos_bull < bars_bos_bear ? "BOS/CHoCH ▲" : bars_bos_bear < bars_bos_bull ? "BOS/CHoCH ▼" : "—", bars_bos_bull < bars_bos_bear ? c_bull : bars_bos_bear < bars_bos_bull ? c_bear : c_neutral)
+    f_row(dash, 6, "ADX", str.tostring(math.round(adx_val, 1)) + (adx_val >= i_adx_min ? " ✓" : " ✗"), adx_val >= i_adx_min ? c_bull : c_bear)
+    f_row(dash, 7, "Choppiness", str.tostring(math.round(chop_idx, 1)) + (chop_idx > i_chop_max ? " ▬" : " ✓"), chop_idx > i_chop_max ? c_warn : c_bull)
+    f_row(dash, 8, "ATR Ratio", str.tostring(math.round(atr_ratio, 2)) + (vola_ok ? " ✓" : " ✗"), vola_ok ? c_bull : c_bear)
+    f_row(dash, 9, "Range Score", str.tostring(range_score) + " / 6", is_sideways ? c_warn : c_bull)
+    f_row(dash, 10, "Momentum", mom_bull ? "BULL " + str.tostring(mom_bull_cnt) + "/4" : mom_bear ? "BEAR " + str.tostring(mom_bear_cnt) + "/4" : "NEUTRAL", mom_bull ? c_bull : mom_bear ? c_bear : c_neutral)
+    f_row(dash, 11, "Rel. Volume", str.tostring(math.round(rel_vol, 2)) + "x" + (vol_spike ? " ✓" : " ✗"), vol_spike ? c_bull : c_neutral)
+    f_row(dash, 12, "Zone", in_discount ? "DISCOUNT" : in_premium ? "PREMIUM" : "EQUILIBRIUM", in_discount ? c_bull : in_premium ? c_bear : c_neutral)
+    f_row(dash, 13, "Session", session_ok ? "ACTIVE ✓" : "CLOSED ✗", session_ok ? c_bull : c_neutral)
+    f_row(dash, 14, "Signal", buy_signal ? "▲ BUY " + str.tostring(buy_score) : sell_signal ? "▼ SELL " + str.tostring(sell_score) : "WAIT", buy_signal ? c_bull : sell_signal ? c_bear : c_neutral)
+    f_row(dash, 15, "Position", strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT", strategy.position_size > 0 ? c_bull : strategy.position_size < 0 ? c_bear : c_neutral)
+    f_row(dash, 16, "SL / TP", not na(pos_sl) ? str.tostring(math.round_to_mintick(pos_sl)) + " / " + str.tostring(math.round_to_mintick(pos_tp)) : "—", c_accent)
+    f_row(dash, 17, "Risk:Reward", not na(rr_live) ? "1 : " + str.tostring(math.round(rr_live, 2)) : "1 : " + str.tostring(i_rr), c_accent)
+    f_row(dash, 18, "Win Rate", str.tostring(math.round(win_rate, 1)) + "%  (" + str.tostring(strategy.closedtrades) + ")", win_rate >= 50 ? c_bull : c_warn)
+    f_row(dash, 19, "Profit Factor", not na(prof_fac) ? str.tostring(math.round(prof_fac, 2)) : "—", not na(prof_fac) and prof_fac >= 1 ? c_bull : c_bear)
+    f_row(dash, 20, "Net Profit", str.tostring(math.round(strategy.netprofit, 2)), strategy.netprofit >= 0 ? c_bull : c_bear)
+
+// ============================================================================
+// SECTION 12 · ALERTS
+// ============================================================================
+alertcondition(buy_signal,  title="🟢 BUY Signal",  message="SMC PRO — BUY {{ticker}} @ {{close}}")
+alertcondition(sell_signal, title="🔴 SELL Signal", message="SMC PRO — SELL {{ticker}} @ {{close}}")
+alertcondition(bos_bull,    title="⬆ BOS Up",       message="SMC PRO — Bullish BOS {{ticker}} @ {{close}}")
+alertcondition(bos_bear,    title="⬇ BOS Down",     message="SMC PRO — Bearish BOS {{ticker}} @ {{close}}")
+alertcondition(choch_bull,  title="🔄 CHoCH Bull",  message="SMC PRO — Bullish CHoCH {{ticker}} @ {{close}}")
+alertcondition(choch_bear,  title="🔄 CHoCH Bear",  message="SMC PRO — Bearish CHoCH {{ticker}} @ {{close}}")
+alertcondition(liq_sweep_dn,title="💧 Sell-Side Sweep", message="SMC PRO — Sell-side liquidity grab {{ticker}} @ {{close}}")
+alertcondition(liq_sweep_up,title="💧 Buy-Side Sweep",  message="SMC PRO — Buy-side liquidity grab {{ticker}} @ {{close}}")
+alertcondition(fvg_bull,    title="📦 Bullish FVG",  message="SMC PRO — Bullish FVG {{ticker}}")
+alertcondition(fvg_bear,    title="📦 Bearish FVG",  message="SMC PRO — Bearish FVG {{ticker}}")
+alertcondition(struct_evt_bull, title="🟩 Order Block (Bull)", message="SMC PRO — Bullish Order Block {{ticker}}")
+alertcondition(struct_evt_bear, title="🟥 Order Block (Bear)", message="SMC PRO — Bearish Order Block {{ticker}}")
+alertcondition(ta.crossover(ema_fast, ema_slow),  title="📈 Trend Change Bull", message="SMC PRO — Trend flipped BULLISH {{ticker}}")
+alertcondition(ta.crossunder(ema_fast, ema_slow), title="📉 Trend Change Bear", message="SMC PRO — Trend flipped BEARISH {{ticker}}")
+
+// TP / SL hit alerts (price interaction with active levels)
+tp_hit = strategy.position_size != 0 and not na(pos_tp) and ((strategy.position_size > 0 and high >= pos_tp) or (strategy.position_size < 0 and low <= pos_tp))
+sl_hit = strategy.position_size != 0 and not na(pos_sl) and ((strategy.position_size > 0 and low <= pos_sl) or (strategy.position_size < 0 and high >= pos_sl))
+alertcondition(tp_hit, title="🎯 Take Profit Hit", message="SMC PRO — TP hit {{ticker}} @ {{close}}")
+alertcondition(sl_hit, title="🛑 Stop Loss Hit",   message="SMC PRO — SL hit {{ticker}} @ {{close}}")
+
+// ── Unified alerts (fire on entries for automation/webhooks) ─────────────────
+if buy_signal
+    alert("SMC PRO BUY " + syminfo.ticker + " @ " + str.tostring(close), alert.freq_once_per_bar_close)
+if sell_signal
+    alert("SMC PRO SELL " + syminfo.ticker + " @ " + str.tostring(close), alert.freq_once_per_bar_close)
