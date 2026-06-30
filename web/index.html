@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SMC Pro Scanner</title>
+    <meta
+      name="description"
+      content="Client-side Smart Money Concept signal scanner — trend, BOS/CHoCH, order blocks, FVG, liquidity, premium/discount, sideways filter."
+    />
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="brand">
+          <span class="logo">⚡</span>
+          <div>
+            <h1>SMC PRO <span>Scanner</span></h1>
+            <p class="tagline">Smart Money Concept signals · client-side · no backend</p>
+          </div>
+        </div>
+        <div class="controls" id="controls"><!-- built by controls.ts --></div>
+      </header>
+
+      <main class="layout">
+        <section class="chart-card">
+          <div class="chart-head">
+            <div id="symbolTitle" class="symbol-title">—</div>
+            <div id="statusBadge" class="status-badge">idle</div>
+          </div>
+          <canvas id="chart"></canvas>
+          <div id="legend" class="legend"></div>
+        </section>
+
+        <aside class="side">
+          <div id="dashboard" class="panel"><!-- dashboard.ts --></div>
+          <div id="settings" class="panel settings"><!-- controls.ts (advanced) --></div>
+        </aside>
+      </main>
+
+      <section class="signals-card">
+        <div class="signals-head">
+          <h2>Signal History</h2>
+          <span id="signalsCount" class="muted"></span>
+        </div>
+        <div id="signalsTable" class="signals-table-wrap"></div>
+      </section>
+
+      <footer class="footnote">
+        Built with Vite + TypeScript. Data: Binance public REST (crypto) with offline demo fallback.
+        Educational tool — not financial advice. Signals resolve on closed bars (no repaint).
+      </footer>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
