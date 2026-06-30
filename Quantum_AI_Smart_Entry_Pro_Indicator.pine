@@ -44,6 +44,10 @@ indicator(title      = "Quantum AI Smart Entry Pro",
 // SECTION 1 · INPUTS  (tuning only — nothing here adds chart drawings)
 // ============================================================================
 
+// ── Signal Mode ─────────────────────────────────────────────────────────────
+grpMode      = "Signal Mode"
+i_every_bar  = input.bool(true, "Every-Candle Mode (BUY or SELL on every bar)", group=grpMode, tooltip="ON  = mark every closed candle with a BUY or SELL arrow based on its directional bias.\nOFF = strict mode: only high-quality signals where all confirmations agree.")
+
 // ── Trend / EMA ─────────────────────────────────────────────────────────────
 grpTrend   = "Trend Filter"
 i_ema_fast = input.int(21,  "Fast EMA Length", minval=1, group=grpTrend)
@@ -173,16 +177,17 @@ htf_bull = not i_use_htf or (htf_c > htf_es and htf_ef > htf_es)
 htf_bear = not i_use_htf or (htf_c < htf_es and htf_ef < htf_es)
 
 // ============================================================================
-// SECTION 3 · STRICT SIGNAL LOGIC  (trigger + ALL confirmations agree)
+// SECTION 3 · SIGNAL LOGIC
 // ----------------------------------------------------------------------------
-// HIGH-QUALITY ENTRY MODEL
-//   1. CONTEXT — every directional confirmation must agree and the market must
-//      NOT be ranging. This is the strict "all confirmations agree" gate.
-//   2. TRIGGER — a discrete momentum-ignition event (MACD signal cross, or RSI
-//      reclaiming its bull/bear level) marks the exact entry bar, so signals
-//      land at genuine turning points instead of firing every bar of a trend.
-//   3. NON-REPAINT — the signal is locked in only on candle close
-//      (barstate.isconfirmed); it can never appear, move or vanish intrabar.
+// Two modes (selected by the "Every-Candle Mode" input):
+//   • EVERY-CANDLE (default): every closed bar gets exactly one BUY or SELL
+//     arrow based on its directional bias — ideal for taking a position on
+//     each candle in binary options.
+//   • STRICT: only high-quality signals where a full set of confirmations
+//     agree and a momentum trigger fires.
+// Both modes are NON-REPAINTING: the signal is locked in only on candle close
+// (barstate.isconfirmed) and uses closed-bar data, so an arrow can never
+// appear, move or disappear intrabar.
 // ============================================================================
 
 // 1 · Directional context (all confirmations must agree).
@@ -193,9 +198,28 @@ bear_context = trend_bear and rsi_bear and macd_bear and di_bear and adx_ok and 
 bull_trigger = macd_cross_up or ta.crossover(rsi_val, i_rsi_bull)
 bear_trigger = macd_cross_dn or ta.crossunder(rsi_val, i_rsi_bear)
 
-// 3 · Final, non-repainting signals — committed strictly on candle close.
-buy_signal  = bull_context and bull_trigger and not bear_context and barstate.isconfirmed
-sell_signal = bear_context and bear_trigger and not bull_context and barstate.isconfirmed
+// 3 · STRICT-mode signals (only when context + trigger agree).
+strict_buy  = bull_context and bull_trigger and not bear_context
+strict_sell = bear_context and bear_trigger and not bull_context
+
+// ----------------------------------------------------------------------------
+// EVERY-CANDLE MODE
+//   Each closed candle is classified as BUY or SELL from a simple directional
+//   bias score (EMA trend, price vs EMA, RSI, MACD, candle body). The result is
+//   always one or the other, so every bar receives exactly one arrow. Ties fall
+//   back to the candle's own colour. Still uses closed-bar data only.
+// ----------------------------------------------------------------------------
+bias_score = (ema_fast > ema_slow ? 1 : -1) + (close > ema_fast ? 1 : -1) + (rsi_val > 50 ? 1 : -1) + (macd_line > macd_sig_line ? 1 : -1) + (close > open ? 1 : -1)
+bias_bull  = bias_score > 0 or (bias_score == 0 and close >= open)
+
+every_buy  = bias_bull
+every_sell = not bias_bull
+
+// ----------------------------------------------------------------------------
+// FINAL, NON-REPAINTING SIGNALS — committed strictly on candle close.
+// ----------------------------------------------------------------------------
+buy_signal  = (i_every_bar ? every_buy  : strict_buy)  and barstate.isconfirmed
+sell_signal = (i_every_bar ? every_sell : strict_sell) and barstate.isconfirmed
 
 // ============================================================================
 // SECTION 4 · THE ONLY VISUAL OUTPUT  (BUY / SELL arrows)
@@ -209,18 +233,14 @@ plotshape(buy_signal,
           style    = shape.triangleup,
           location = location.belowbar,
           color    = color.new(#00e676, 0),
-          size     = size.small,
-          text     = "BUY",
-          textcolor = color.new(#00e676, 0))
+          size     = size.tiny)
 
 plotshape(sell_signal,
           title    = "SELL Signal",
           style    = shape.triangledown,
           location = location.abovebar,
           color    = color.new(#ff1744, 0),
-          size     = size.small,
-          text     = "SELL",
-          textcolor = color.new(#ff1744, 0))
+          size     = size.tiny)
 
 // ============================================================================
 // SECTION 5 · ALERTS  (exactly two — nothing else)
