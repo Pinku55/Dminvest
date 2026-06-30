@@ -66,13 +66,13 @@ i_macd_sig  = input.int(9,  "MACD Signal", minval=1, group=grpMacd)
 // ── ADX / Trend Strength ────────────────────────────────────────────────────
 grpAdx     = "Trend Strength (ADX)"
 i_adx_len  = input.int(14,   "ADX Length",            minval=1, group=grpAdx)
-i_adx_min  = input.float(22, "ADX Minimum Threshold", minval=1, group=grpAdx)
+i_adx_min  = input.float(20, "ADX Minimum Threshold", minval=1, group=grpAdx)
 
 // ── Volume ──────────────────────────────────────────────────────────────────
 grpVol     = "Volume"
 i_use_vol  = input.bool(true, "Require Volume Confirmation",  group=grpVol)
 i_vol_len  = input.int(20,    "Volume Average Length", minval=1, group=grpVol)
-i_vol_mult = input.float(1.2, "Relative-Volume Threshold (x avg)", minval=0.1, step=0.1, group=grpVol)
+i_vol_mult = input.float(1.0, "Relative-Volume Threshold (x avg)", minval=0.1, step=0.1, group=grpVol)
 
 // ── Higher-Timeframe Confirmation ───────────────────────────────────────────
 grpHtf     = "Higher-Timeframe Confirmation"
@@ -113,6 +113,9 @@ rsi_bear = rsi_val < i_rsi_bear and rsi_val < rsi_val[1] and rsi_val > i_rsi_os
 [macd_line, macd_sig_line, macd_hist] = ta.macd(close, i_macd_fast, i_macd_slow, i_macd_sig)
 macd_bull = macd_line > macd_sig_line and macd_hist > 0
 macd_bear = macd_line < macd_sig_line and macd_hist < 0
+// Momentum-ignition crossovers (used as the discrete trigger event below).
+macd_cross_up = ta.crossover(macd_line, macd_sig_line)
+macd_cross_dn = ta.crossunder(macd_line, macd_sig_line)
 
 // ── 2.4 ATR / Volatility ───────────────────────────────────────────────────
 atr_val = ta.atr(i_atr_len)
@@ -170,25 +173,29 @@ htf_bull = not i_use_htf or (htf_c > htf_es and htf_ef > htf_es)
 htf_bear = not i_use_htf or (htf_c < htf_es and htf_ef < htf_es)
 
 // ============================================================================
-// SECTION 3 · STRICT SIGNAL LOGIC  (ALL confirmations must agree)
+// SECTION 3 · STRICT SIGNAL LOGIC  (trigger + ALL confirmations agree)
 // ----------------------------------------------------------------------------
-// A directional "state" is true only when every bullish/bearish filter aligns
-// and the market is not ranging. We then emit a discrete signal on the FIRST
-// confirmed bar that the alignment occurs (rising edge), so arrows are clean
-// one-shot events rather than a continuous run. Finally, barstate.isconfirmed
-// guarantees the signal is locked in only after the candle closes.
+// HIGH-QUALITY ENTRY MODEL
+//   1. CONTEXT — every directional confirmation must agree and the market must
+//      NOT be ranging. This is the strict "all confirmations agree" gate.
+//   2. TRIGGER — a discrete momentum-ignition event (MACD signal cross, or RSI
+//      reclaiming its bull/bear level) marks the exact entry bar, so signals
+//      land at genuine turning points instead of firing every bar of a trend.
+//   3. NON-REPAINT — the signal is locked in only on candle close
+//      (barstate.isconfirmed); it can never appear, move or vanish intrabar.
 // ============================================================================
 
-bull_state = trend_bull and rsi_bull and macd_bull and di_bull and adx_ok and vol_ok and candle_bull and htf_bull and not is_ranging
-bear_state = trend_bear and rsi_bear and macd_bear and di_bear and adx_ok and vol_ok and candle_bear and htf_bear and not is_ranging
+// 1 · Directional context (all confirmations must agree).
+bull_context = trend_bull and rsi_bull and macd_bull and di_bull and adx_ok and vol_ok and candle_bull and htf_bull and not is_ranging
+bear_context = trend_bear and rsi_bear and macd_bear and di_bear and adx_ok and vol_ok and candle_bear and htf_bear and not is_ranging
 
-// Rising edge: only the first bar of a fresh alignment qualifies.
-bull_edge = bull_state and not bull_state[1]
-bear_edge = bear_state and not bear_state[1]
+// 2 · Momentum-ignition trigger (the discrete entry event).
+bull_trigger = macd_cross_up or ta.crossover(rsi_val, i_rsi_bull)
+bear_trigger = macd_cross_dn or ta.crossunder(rsi_val, i_rsi_bear)
 
-// Final, non-repainting signals — committed strictly on candle close.
-buy_signal  = bull_edge and not bear_state and barstate.isconfirmed
-sell_signal = bear_edge and not bull_state and barstate.isconfirmed
+// 3 · Final, non-repainting signals — committed strictly on candle close.
+buy_signal  = bull_context and bull_trigger and not bear_context and barstate.isconfirmed
+sell_signal = bear_context and bear_trigger and not bull_context and barstate.isconfirmed
 
 // ============================================================================
 // SECTION 4 · THE ONLY VISUAL OUTPUT  (BUY / SELL arrows)
