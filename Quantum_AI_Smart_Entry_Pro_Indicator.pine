@@ -240,17 +240,21 @@ sell_signal = i_early ? raw_sell[1] : (raw_sell and barstate.isconfirmed)
 // ============================================================================
 plotshape(buy_signal,
           title    = "BUY Signal",
-          style    = shape.triangleup,
+          style    = shape.labelup,
           location = location.belowbar,
           color    = color.new(#00e676, 0),
-          size     = size.tiny)
+          size     = size.small,
+          text     = "BUY",
+          textcolor = color.white)
 
 plotshape(sell_signal,
           title    = "SELL Signal",
-          style    = shape.triangledown,
+          style    = shape.labeldown,
           location = location.abovebar,
           color    = color.new(#ff1744, 0),
-          size     = size.tiny)
+          size     = size.small,
+          text     = "SELL",
+          textcolor = color.white)
 
 // ============================================================================
 // SECTION 5 · ALERTS  (exactly two — nothing else)
