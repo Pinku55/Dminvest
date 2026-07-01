@@ -1,38 +1,34 @@
 // ============================================================================
-// QUANTUM AI SMART ENTRY PRO — Indicator
-// Version      : 2.0.0  (Strict Clean-UI rebuild)
+// QUANTUM AI SMART ENTRY PRO — Candlestick-Pattern Edition
+// Version      : 3.0.0
 // Pine Script  : v6
 // Author       : Quantum AI Systems
 // ----------------------------------------------------------------------------
 // PURPOSE
-//   High-probability, NON-REPAINTING entry indicator tuned for OTC Binary
-//   Options on the 1-minute and 5-minute timeframes.
+//   A clean, NON-REPAINTING entry indicator that fires ONLY on high-quality
+//   candlestick patterns. Designed to be paired with a separate
+//   Support/Resistance Channel indicator: this tool supplies the candlestick
+//   trigger, the S/R channel supplies the location context.
 //
-// STRICT UI CONTRACT (by design — do not change without intent)
-//   The chart stays COMPLETELY clean. The ONLY things drawn are:
-//       • a GREEN  BUY  arrow BELOW the candle
-//       • a RED    SELL arrow ABOVE the candle
-//   Nothing else is ever plotted or drawn: no EMA/SMA/VWAP lines, no RSI/MACD/
-//   ADX/ATR/Bollinger sub-plots, no support/resistance, no order blocks, FVGs,
-//   liquidity zones, BOS/CHoCH labels, no dashboard, trend/probability labels,
-//   volume histogram, market-structure lines, candle-pattern names, background
-//   colors, tables, boxes, zones, trendlines, debug text, stats or watermarks.
+// STRICT UI CONTRACT
+//   The chart stays completely clean. The ONLY things drawn are:
+//       • a GREEN  "BUY"  label BELOW the candle
+//       • a RED    "SELL" label ABOVE the candle
+//   No EMA/RSI/MACD lines, no zones, boxes, tables, backgrounds, S/R lines,
+//   dashboards or debug text. Every calculation stays internal.
 //
-//   Every filter below is computed INTERNALLY but NEVER displayed.
+// SIGNAL SOURCE  (candlestick patterns only)
+//   Bullish : Bullish Engulfing, Hammer / Bullish Pin Bar, Piercing Line,
+//             Morning Star, Tweezer Bottom, Bullish Marubozu.
+//   Bearish : Bearish Engulfing, Shooting Star / Bearish Pin Bar, Dark Cloud
+//             Cover, Evening Star, Tweezer Top, Bearish Marubozu.
 //
 // NON-REPAINT GUARANTEES
-//   • All decisions use values from CLOSED candles only.
-//   • A signal is committed solely on bar close (barstate.isconfirmed), so an
-//     arrow can never appear, move or disappear intrabar.
-//   • Higher-timeframe data is pulled with lookahead_off + gaps_off and is only
-//     ever evaluated at bar close, so it cannot repaint.
-//   • Pivots confirm N bars after the fact (inherently non-repainting).
-//
-// SIGNAL PHILOSOPHY
-//   BUY  fires ONLY when EVERY bullish confirmation agrees.
-//   SELL fires ONLY when EVERY bearish confirmation agrees.
-//   Ranging / sideways markets are actively filtered out.
-//   "No signal" is preferred over a low-quality signal.
+//   • Patterns are evaluated on CLOSED candles only.
+//   • Early mode shows the just-completed pattern at the OPEN of the next
+//     candle (via [1]); the value is fixed the instant the candle opens.
+//   • Confirmed mode commits on candle close (barstate.isconfirmed).
+//   • In both cases an arrow can never appear, move or disappear intrabar.
 // ============================================================================
 
 //@version=6
@@ -41,219 +37,122 @@ indicator(title      = "Quantum AI Smart Entry Pro",
           overlay    = true)
 
 // ============================================================================
-// SECTION 1 · INPUTS  (tuning only — nothing here adds chart drawings)
+// SECTION 1 · INPUTS
 // ============================================================================
 
-// ── Signal Mode ─────────────────────────────────────────────────────────────
-grpMode      = "Signal Mode"
-i_every_bar  = input.bool(true, "Every-Candle Mode (BUY or SELL on every bar)", group=grpMode, tooltip="ON  = mark every closed candle with a BUY or SELL arrow based on its directional bias.\nOFF = strict mode: only high-quality signals where all confirmations agree.")
-i_early      = input.bool(true, "Early Signals (show at candle OPEN, no delay)", group=grpMode, tooltip="ON  = the arrow appears at the OPEN of the current candle, predicting its direction from the just-closed candle. Enter the moment the candle opens. Non-repainting (uses only closed-bar data).\nOFF = arrow appears after the candle CLOSES (confirmation), which is one candle later.")
+// ── Signal Timing ────────────────────────────────────────────────────────
+grpMode = "Signal Timing"
+i_early = input.bool(true, "Early Signals (show at candle OPEN, no delay)", group=grpMode, tooltip="ON  = the pattern completes on the prior candle and the arrow appears at the OPEN of the current candle (enter with no delay). Non-repainting.\nOFF = arrow appears when the pattern candle CLOSES (confirmation).")
 
-// ── Trend / EMA ─────────────────────────────────────────────────────────────
-grpTrend   = "Trend Filter"
-i_ema_fast = input.int(21,  "Fast EMA Length", minval=1, group=grpTrend)
-i_ema_slow = input.int(50,  "Slow EMA Length", minval=1, group=grpTrend)
+// ── Optional Trend Filter (kept OFF so signals are pure candlestick) ────────
+grpTrend    = "Optional Trend Filter"
+i_use_trend = input.bool(false, "Only take patterns in the direction of an EMA", group=grpTrend)
+i_trend_ema = input.int(50, "Trend EMA Length", minval=1, group=grpTrend)
 
-// ── Momentum / RSI ──────────────────────────────────────────────────────────
-grpRsi     = "RSI"
-i_rsi_len  = input.int(14,   "RSI Length",      minval=1,  group=grpRsi)
-i_rsi_bull = input.float(52, "RSI Bull Level",  minval=50, maxval=100, group=grpRsi)
-i_rsi_bear = input.float(48, "RSI Bear Level",  minval=0,  maxval=50,  group=grpRsi)
-i_rsi_ob   = input.float(78, "RSI Overbought (skip late longs)",  minval=50, maxval=100, group=grpRsi)
-i_rsi_os   = input.float(22, "RSI Oversold (skip late shorts)",   minval=0,  maxval=50,  group=grpRsi)
+// ── Pattern Sensitivity ──────────────────────────────────────────────────
+grpSens     = "Pattern Sensitivity"
+i_body_len  = input.int(14,    "Average-Body Length (significance)", minval=1, group=grpSens)
+i_wick_mult = input.float(2.0, "Pin/Hammer wick-to-body ratio", minval=1.0, step=0.1, group=grpSens)
+i_maru_pct  = input.float(0.90,"Marubozu body-to-range ratio", minval=0.5, maxval=1.0, step=0.01, group=grpSens)
+i_tw_tol    = input.float(0.10,"Tweezer tolerance (x ATR)", minval=0.0, step=0.05, group=grpSens)
 
-// ── MACD ──────────────────────────────────────────────────────────────────
-grpMacd     = "MACD"
-i_macd_fast = input.int(12, "MACD Fast",   minval=1, group=grpMacd)
-i_macd_slow = input.int(26, "MACD Slow",   minval=1, group=grpMacd)
-i_macd_sig  = input.int(9,  "MACD Signal", minval=1, group=grpMacd)
-
-// ── ADX / Trend Strength ────────────────────────────────────────────────────
-grpAdx     = "Trend Strength (ADX)"
-i_adx_len  = input.int(14,   "ADX Length",            minval=1, group=grpAdx)
-i_adx_min  = input.float(20, "ADX Minimum Threshold", minval=1, group=grpAdx)
-
-// ── Volume ──────────────────────────────────────────────────────────────────
-grpVol     = "Volume"
-i_use_vol  = input.bool(true, "Require Volume Confirmation",  group=grpVol)
-i_vol_len  = input.int(20,    "Volume Average Length", minval=1, group=grpVol)
-i_vol_mult = input.float(1.0, "Relative-Volume Threshold (x avg)", minval=0.1, step=0.1, group=grpVol)
-
-// ── Higher-Timeframe Confirmation ───────────────────────────────────────────
-grpHtf     = "Higher-Timeframe Confirmation"
-i_use_htf  = input.bool(true, "Require HTF Trend Alignment", group=grpHtf)
-i_htf      = input.timeframe("5", "Confirmation Timeframe (use 5 for 1m, 15 for 5m)", group=grpHtf)
-
-// ── Sideways / Ranging Filter ─────────────────────────────────────────────
-grpRange    = "Sideways / Ranging Filter"
-i_use_range = input.bool(true,  "Block signals in ranging markets", group=grpRange)
-i_chop_len  = input.int(14,     "Choppiness Index Length", minval=2, group=grpRange)
-i_chop_max  = input.float(55,   "Choppiness Ranging Threshold (>)", minval=1, group=grpRange)
-i_sep_min   = input.float(0.05, "Min EMA separation % (flat below)", minval=0.0, step=0.01, group=grpRange)
-i_atr_len   = input.int(14,     "ATR Length (volatility floor)", minval=1, group=grpRange)
-i_atr_avg   = input.int(50,     "ATR Average Length", minval=1, group=grpRange)
-i_atr_comp  = input.float(0.8,  "ATR compression factor (atr < avg x => dead)", minval=0.1, step=0.05, group=grpRange)
+// ── Pattern Toggles ────────────────────────────────────────────────────────
+grpPat        = "Candlestick Patterns"
+i_use_engulf  = input.bool(true, "Engulfing",              group=grpPat)
+i_use_pin     = input.bool(true, "Hammer / Pin / Shooting Star", group=grpPat)
+i_use_pierce  = input.bool(true, "Piercing / Dark Cloud",  group=grpPat)
+i_use_star    = input.bool(true, "Morning / Evening Star", group=grpPat)
+i_use_tweezer = input.bool(true, "Tweezer Top / Bottom",   group=grpPat)
+i_use_maru    = input.bool(true, "Marubozu",               group=grpPat)
 
 // ============================================================================
-// SECTION 2 · CORE CALCULATIONS  (INTERNAL ONLY — never drawn)
-// ----------------------------------------------------------------------------
-// Everything resolves on confirmed bars. Built-in ta.* functions use the
-// current close; the final signal is additionally gated by
-// barstate.isconfirmed so nothing is acted on until the candle closes.
+// SECTION 2 · CANDLE ANATOMY  (internal only)
 // ============================================================================
-
-// ── 2.1 EMA Trend ─────────────────────────────────────────────────────────
-ema_fast  = ta.ema(close, i_ema_fast)
-ema_slow  = ta.ema(close, i_ema_slow)
-trend_bull = ema_fast > ema_slow and close > ema_fast
-trend_bear = ema_fast < ema_slow and close < ema_fast
-
-// ── 2.2 RSI ──────────────────────────────────────────────────────────────
-rsi_val  = ta.rsi(close, i_rsi_len)
-// Bullish: above bull level, rising, and not already over-extended.
-rsi_bull = rsi_val > i_rsi_bull and rsi_val > rsi_val[1] and rsi_val < i_rsi_ob
-rsi_bear = rsi_val < i_rsi_bear and rsi_val < rsi_val[1] and rsi_val > i_rsi_os
-
-// ── 2.3 MACD ─────────────────────────────────────────────────────────────
-[macd_line, macd_sig_line, macd_hist] = ta.macd(close, i_macd_fast, i_macd_slow, i_macd_sig)
-macd_bull = macd_line > macd_sig_line and macd_hist > 0
-macd_bear = macd_line < macd_sig_line and macd_hist < 0
-// Momentum-ignition crossovers (used as the discrete trigger event below).
-macd_cross_up = ta.crossover(macd_line, macd_sig_line)
-macd_cross_dn = ta.crossunder(macd_line, macd_sig_line)
-
-// ── 2.4 ATR / Volatility ───────────────────────────────────────────────────
-atr_val = ta.atr(i_atr_len)
-atr_avg = ta.sma(atr_val, i_atr_avg)
-atr_ok  = atr_val >= atr_avg * i_atr_comp   // reject dead / compressed volatility
-
-// ── 2.5 ADX / DMI (manual, v6-safe) ────────────────────────────────────────
-up_move  = high - high[1]
-dn_move  = low[1] - low
-plus_dm  = up_move > dn_move and up_move > 0 ? up_move : 0.0
-minus_dm = dn_move > up_move and dn_move > 0 ? dn_move : 0.0
-tr_rma   = ta.rma(ta.tr(true), i_adx_len)
-plus_di  = tr_rma > 0 ? 100 * ta.rma(plus_dm,  i_adx_len) / tr_rma : 0.0
-minus_di = tr_rma > 0 ? 100 * ta.rma(minus_dm, i_adx_len) / tr_rma : 0.0
-di_sum   = plus_di + minus_di
-dx       = di_sum > 0 ? 100 * math.abs(plus_di - minus_di) / di_sum : 0.0
-adx_val  = ta.rma(dx, i_adx_len)
-adx_ok   = adx_val >= i_adx_min
-di_bull  = plus_di > minus_di
-di_bear  = minus_di > plus_di
-
-// ── 2.6 Volume ─────────────────────────────────────────────────────────────
-// Many OTC / synthetic feeds report no (or zero) volume. When volume data is
-// unavailable, volume confirmation is treated as neutral (never blocks).
-vol_sma  = ta.sma(volume, i_vol_len)
-has_vol  = not na(vol_sma) and vol_sma > 0
-vol_spike = has_vol ? (volume >= vol_sma * i_vol_mult) : true
-vol_ok    = not i_use_vol or vol_spike
-
-// ── 2.7 Candle Confirmation ────────────────────────────────────────────────
-candle_bull = close > open    // demand candle
-candle_bear = close < open    // supply candle
-
-// ── 2.8 Choppiness Index (ranging detector) ────────────────────────────────
-chop_hi  = ta.highest(high, i_chop_len)
-chop_lo  = ta.lowest(low,  i_chop_len)
-chop_sum = math.sum(ta.tr(true), i_chop_len)
-chop_rng = chop_hi - chop_lo
-chop_idx = chop_rng > 0 ? 100 * math.log10(chop_sum / chop_rng) / math.log10(i_chop_len) : 0.0
-
-// ── 2.9 EMA separation (flat-market detector) ──────────────────────────────
-ema_sep_pct = ema_slow > 0 ? math.abs(ema_fast - ema_slow) / ema_slow * 100 : 0.0
-ema_flat    = ema_sep_pct < i_sep_min
-
-// ── 2.10 Sideways / Ranging State ───────────────────────────────────────────
-// Ranging if trend is weak (low ADX) OR choppiness is high OR EMAs are flat
-// OR volatility has collapsed. Any one is enough to stand aside.
-is_ranging = i_use_range and (not adx_ok or chop_idx > i_chop_max or ema_flat or not atr_ok)
-
-// ── 2.11 Higher-Timeframe Bias (non-repainting) ─────────────────────────────
-[htf_ef, htf_es, htf_c] = request.security(syminfo.tickerid, i_htf,
-     [ta.ema(close, i_ema_fast), ta.ema(close, i_ema_slow), close],
-     gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
-htf_bull = not i_use_htf or (htf_c > htf_es and htf_ef > htf_es)
-htf_bear = not i_use_htf or (htf_c < htf_es and htf_ef < htf_es)
+body    = math.abs(close - open)
+rng     = math.max(high - low, syminfo.mintick)     // guard against zero range
+upWick  = high - math.max(open, close)
+dnWick  = math.min(open, close) - low
+isBull  = close > open
+isBear  = close < open
+bodyAvg = ta.sma(body, i_body_len)
+sigBody = body > bodyAvg                              // "significant" body
+atr14   = ta.atr(14)
+tol     = i_tw_tol * atr14
 
 // ============================================================================
-// SECTION 3 · SIGNAL LOGIC
-// ----------------------------------------------------------------------------
-// Two modes (selected by the "Every-Candle Mode" input):
-//   • EVERY-CANDLE (default): every closed bar gets exactly one BUY or SELL
-//     arrow based on its directional bias — ideal for taking a position on
-//     each candle in binary options.
-//   • STRICT: only high-quality signals where a full set of confirmations
-//     agree and a momentum trigger fires.
-// Both modes are NON-REPAINTING: the signal is locked in only on candle close
-// (barstate.isconfirmed) and uses closed-bar data, so an arrow can never
-// appear, move or disappear intrabar.
+// SECTION 3 · CANDLESTICK PATTERNS  (all evaluated on closed data)
 // ============================================================================
 
-// 1 · Directional context (all confirmations must agree).
-bull_context = trend_bull and rsi_bull and macd_bull and di_bull and adx_ok and vol_ok and candle_bull and htf_bull and not is_ranging
-bear_context = trend_bear and rsi_bear and macd_bear and di_bear and adx_ok and vol_ok and candle_bear and htf_bear and not is_ranging
+// ── 3.1 Engulfing ──────────────────────────────────────────────────────────
+bullEngulf = i_use_engulf and isBull and isBear[1] and close >= open[1] and open <= close[1] and body > body[1]
+bearEngulf = i_use_engulf and isBear and isBull[1] and close <= open[1] and open >= close[1] and body > body[1]
 
-// 2 · Momentum-ignition trigger (the discrete entry event).
-bull_trigger = macd_cross_up or ta.crossover(rsi_val, i_rsi_bull)
-bear_trigger = macd_cross_dn or ta.crossunder(rsi_val, i_rsi_bear)
+// ── 3.2 Hammer / Pin Bar / Shooting Star ────────────────────────────────────
+hammer     = i_use_pin and dnWick >= i_wick_mult * body and upWick <= body and body > 0
+shootStar  = i_use_pin and upWick >= i_wick_mult * body and dnWick <= body and body > 0
 
-// 3 · STRICT-mode signals (only when context + trigger agree).
-strict_buy  = bull_context and bull_trigger and not bear_context
-strict_sell = bear_context and bear_trigger and not bull_context
+// ── 3.3 Piercing Line / Dark Cloud Cover ────────────────────────────────────
+mid1       = (open[1] + close[1]) / 2
+piercing   = i_use_pierce and isBear[1] and isBull and open < close[1] and close > mid1 and close < open[1]
+darkCloud  = i_use_pierce and isBull[1] and isBear and open > close[1] and close < mid1 and close > open[1]
 
-// ----------------------------------------------------------------------------
-// EVERY-CANDLE MODE
-//   Each closed candle is classified as BUY or SELL from a simple directional
-//   bias score (EMA trend, price vs EMA, RSI, MACD, candle body). The result is
-//   always one or the other, so every bar receives exactly one arrow. Ties fall
-//   back to the candle's own colour. Still uses closed-bar data only.
-// ----------------------------------------------------------------------------
-bias_score = (ema_fast > ema_slow ? 1 : -1) + (close > ema_fast ? 1 : -1) + (rsi_val > 50 ? 1 : -1) + (macd_line > macd_sig_line ? 1 : -1) + (close > open ? 1 : -1)
-bias_bull  = bias_score > 0 or (bias_score == 0 and close >= open)
+// ── 3.4 Morning Star / Evening Star (3-candle) ──────────────────────────────
+mid2       = (open[2] + close[2]) / 2
+morningStar = i_use_star and isBear[2] and sigBody[2] and body[1] < body[2] * 0.5 and isBull and sigBody and close > mid2
+eveningStar = i_use_star and isBull[2] and sigBody[2] and body[1] < body[2] * 0.5 and isBear and sigBody and close < mid2
 
-every_buy  = bias_bull
-every_sell = not bias_bull
+// ── 3.5 Tweezer Top / Bottom ────────────────────────────────────────────────
+tweezerBot = i_use_tweezer and isBear[1] and isBull and math.abs(low  - low[1])  <= tol
+tweezerTop = i_use_tweezer and isBull[1] and isBear and math.abs(high - high[1]) <= tol
 
-// ----------------------------------------------------------------------------
-// FINAL, NON-REPAINTING SIGNALS
-//   raw_*  = the mode's raw decision for a candle.
-//   EARLY (default): show the just-completed candle's decision at the OPEN of
-//     the current candle — i.e. predict the current candle's direction so you
-//     can enter with no delay. It depends only on closed-bar data (previous
-//     candle), so it is fixed the instant the candle opens and never repaints.
-//   CONFIRMED: show the decision after the candle CLOSES (one candle later).
-// ----------------------------------------------------------------------------
-raw_buy  = i_every_bar ? every_buy  : strict_buy
-raw_sell = i_every_bar ? every_sell : strict_sell
+// ── 3.6 Marubozu ─────────────────────────────────────────────────────────
+maruBull   = i_use_maru and isBull and body >= i_maru_pct * rng
+maruBear   = i_use_maru and isBear and body >= i_maru_pct * rng
 
+// ── 3.7 Aggregate bullish / bearish pattern ──────────────────────────────
+bullPattern = bullEngulf or hammer or piercing or morningStar or tweezerBot or maruBull
+bearPattern = bearEngulf or shootStar or darkCloud or eveningStar or tweezerTop or maruBear
+
+// ============================================================================
+// SECTION 4 · SIGNAL LOGIC  (candlestick only, non-repainting)
+// ============================================================================
+emaTrend  = ta.ema(close, i_trend_ema)
+trendUpOk = not i_use_trend or close > emaTrend
+trendDnOk = not i_use_trend or close < emaTrend
+
+// Raw decision on the (closed) pattern candle. Mutually exclusive so a bar
+// that somehow flags both directions is skipped rather than mislabelled.
+raw_buy  = bullPattern and not bearPattern and trendUpOk
+raw_sell = bearPattern and not bullPattern and trendDnOk
+
+// Timing: EARLY shows the prior candle's pattern at this candle's open;
+// CONFIRMED commits on close of the pattern candle. Both are non-repainting.
 buy_signal  = i_early ? raw_buy[1]  : (raw_buy  and barstate.isconfirmed)
 sell_signal = i_early ? raw_sell[1] : (raw_sell and barstate.isconfirmed)
 
 // ============================================================================
-// SECTION 4 · THE ONLY VISUAL OUTPUT  (BUY / SELL arrows)
-// ----------------------------------------------------------------------------
-// plotshape is used (not labels) so signals are lightweight, fixed in place,
-// and can never move or be cleared. Green BUY arrow below the bar; red SELL
-// arrow above the bar. This is the entire chart footprint of the indicator.
+// SECTION 5 · THE ONLY VISUAL OUTPUT  (BUY / SELL labels)
 // ============================================================================
 plotshape(buy_signal,
-          title    = "BUY Signal",
-          style    = shape.triangleup,
-          location = location.belowbar,
-          color    = color.new(#00e676, 0),
-          size     = size.tiny)
+          title     = "BUY Signal",
+          style     = shape.labelup,
+          location  = location.belowbar,
+          color     = color.new(#00e676, 0),
+          size      = size.small,
+          text      = "BUY",
+          textcolor = color.white)
 
 plotshape(sell_signal,
-          title    = "SELL Signal",
-          style    = shape.triangledown,
-          location = location.abovebar,
-          color    = color.new(#ff1744, 0),
-          size     = size.tiny)
+          title     = "SELL Signal",
+          style     = shape.labeldown,
+          location  = location.abovebar,
+          color     = color.new(#ff1744, 0),
+          size      = size.small,
+          text      = "SELL",
+          textcolor = color.white)
 
 // ============================================================================
-// SECTION 5 · ALERTS  (exactly two — nothing else)
+// SECTION 6 · ALERTS  (exactly two)
 // ============================================================================
 alertcondition(buy_signal,
                title   = "BUY Signal",
