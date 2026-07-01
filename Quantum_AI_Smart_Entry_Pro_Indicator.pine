@@ -47,6 +47,7 @@ indicator(title      = "Quantum AI Smart Entry Pro",
 // ── Signal Mode ─────────────────────────────────────────────────────────────
 grpMode      = "Signal Mode"
 i_every_bar  = input.bool(true, "Every-Candle Mode (BUY or SELL on every bar)", group=grpMode, tooltip="ON  = mark every closed candle with a BUY or SELL arrow based on its directional bias.\nOFF = strict mode: only high-quality signals where all confirmations agree.")
+i_early      = input.bool(true, "Early Signals (show at candle OPEN, no delay)", group=grpMode, tooltip="ON  = the arrow appears at the OPEN of the current candle, predicting its direction from the just-closed candle. Enter the moment the candle opens. Non-repainting (uses only closed-bar data).\nOFF = arrow appears after the candle CLOSES (confirmation), which is one candle later.")
 
 // ── Trend / EMA ─────────────────────────────────────────────────────────────
 grpTrend   = "Trend Filter"
@@ -216,10 +217,19 @@ every_buy  = bias_bull
 every_sell = not bias_bull
 
 // ----------------------------------------------------------------------------
-// FINAL, NON-REPAINTING SIGNALS — committed strictly on candle close.
+// FINAL, NON-REPAINTING SIGNALS
+//   raw_*  = the mode's raw decision for a candle.
+//   EARLY (default): show the just-completed candle's decision at the OPEN of
+//     the current candle — i.e. predict the current candle's direction so you
+//     can enter with no delay. It depends only on closed-bar data (previous
+//     candle), so it is fixed the instant the candle opens and never repaints.
+//   CONFIRMED: show the decision after the candle CLOSES (one candle later).
 // ----------------------------------------------------------------------------
-buy_signal  = (i_every_bar ? every_buy  : strict_buy)  and barstate.isconfirmed
-sell_signal = (i_every_bar ? every_sell : strict_sell) and barstate.isconfirmed
+raw_buy  = i_every_bar ? every_buy  : strict_buy
+raw_sell = i_every_bar ? every_sell : strict_sell
+
+buy_signal  = i_early ? raw_buy[1]  : (raw_buy  and barstate.isconfirmed)
+sell_signal = i_early ? raw_sell[1] : (raw_sell and barstate.isconfirmed)
 
 // ============================================================================
 // SECTION 4 · THE ONLY VISUAL OUTPUT  (BUY / SELL arrows)
