@@ -1,0 +1,163 @@
+// ============================================================================
+// QUANTUM AI SMART ENTRY PRO — Candlestick-Pattern Edition
+// Version      : 3.0.0
+// Pine Script  : v6
+// Author       : Quantum AI Systems
+// ----------------------------------------------------------------------------
+// PURPOSE
+//   A clean, NON-REPAINTING entry indicator that fires ONLY on high-quality
+//   candlestick patterns. Designed to be paired with a separate
+//   Support/Resistance Channel indicator: this tool supplies the candlestick
+//   trigger, the S/R channel supplies the location context.
+//
+// STRICT UI CONTRACT
+//   The chart stays completely clean. The ONLY things drawn are:
+//       • a GREEN  "BUY"  label BELOW the candle
+//       • a RED    "SELL" label ABOVE the candle
+//   No EMA/RSI/MACD lines, no zones, boxes, tables, backgrounds, S/R lines,
+//   dashboards or debug text. Every calculation stays internal.
+//
+// SIGNAL SOURCE  (candlestick patterns only)
+//   Bullish : Bullish Engulfing, Hammer / Bullish Pin Bar, Piercing Line,
+//             Morning Star, Tweezer Bottom, Bullish Marubozu.
+//   Bearish : Bearish Engulfing, Shooting Star / Bearish Pin Bar, Dark Cloud
+//             Cover, Evening Star, Tweezer Top, Bearish Marubozu.
+//
+// NON-REPAINT GUARANTEES
+//   • Patterns are evaluated on CLOSED candles only.
+//   • Early mode shows the just-completed pattern at the OPEN of the next
+//     candle (via [1]); the value is fixed the instant the candle opens.
+//   • Confirmed mode commits on candle close (barstate.isconfirmed).
+//   • In both cases an arrow can never appear, move or disappear intrabar.
+// ============================================================================
+
+//@version=6
+indicator(title      = "Quantum AI Smart Entry Pro",
+          shorttitle = "QASEP",
+          overlay    = true)
+
+// ============================================================================
+// SECTION 1 · INPUTS
+// ============================================================================
+
+// ── Signal Timing ────────────────────────────────────────────────────────
+grpMode = "Signal Timing"
+i_early = input.bool(true, "Early Signals (show at candle OPEN, no delay)", group=grpMode, tooltip="ON  = the pattern completes on the prior candle and the arrow appears at the OPEN of the current candle (enter with no delay). Non-repainting.\nOFF = arrow appears when the pattern candle CLOSES (confirmation).")
+
+// ── Optional Trend Filter (kept OFF so signals are pure candlestick) ────────
+grpTrend    = "Optional Trend Filter"
+i_use_trend = input.bool(false, "Only take patterns in the direction of an EMA", group=grpTrend)
+i_trend_ema = input.int(50, "Trend EMA Length", minval=1, group=grpTrend)
+
+// ── Pattern Sensitivity ──────────────────────────────────────────────────
+grpSens     = "Pattern Sensitivity"
+i_body_len  = input.int(14,    "Average-Body Length (significance)", minval=1, group=grpSens)
+i_wick_mult = input.float(2.0, "Pin/Hammer wick-to-body ratio", minval=1.0, step=0.1, group=grpSens)
+i_maru_pct  = input.float(0.90,"Marubozu body-to-range ratio", minval=0.5, maxval=1.0, step=0.01, group=grpSens)
+i_tw_tol    = input.float(0.10,"Tweezer tolerance (x ATR)", minval=0.0, step=0.05, group=grpSens)
+
+// ── Pattern Toggles ────────────────────────────────────────────────────────
+grpPat        = "Candlestick Patterns"
+i_use_engulf  = input.bool(true, "Engulfing",              group=grpPat)
+i_use_pin     = input.bool(true, "Hammer / Pin / Shooting Star", group=grpPat)
+i_use_pierce  = input.bool(true, "Piercing / Dark Cloud",  group=grpPat)
+i_use_star    = input.bool(true, "Morning / Evening Star", group=grpPat)
+i_use_tweezer = input.bool(true, "Tweezer Top / Bottom",   group=grpPat)
+i_use_maru    = input.bool(true, "Marubozu",               group=grpPat)
+
+// ============================================================================
+// SECTION 2 · CANDLE ANATOMY  (internal only)
+// ============================================================================
+body    = math.abs(close - open)
+rng     = math.max(high - low, syminfo.mintick)     // guard against zero range
+upWick  = high - math.max(open, close)
+dnWick  = math.min(open, close) - low
+isBull  = close > open
+isBear  = close < open
+bodyAvg = ta.sma(body, i_body_len)
+sigBody = body > bodyAvg                              // "significant" body
+atr14   = ta.atr(14)
+tol     = i_tw_tol * atr14
+
+// ============================================================================
+// SECTION 3 · CANDLESTICK PATTERNS  (all evaluated on closed data)
+// ============================================================================
+
+// ── 3.1 Engulfing ──────────────────────────────────────────────────────────
+bullEngulf = i_use_engulf and isBull and isBear[1] and close >= open[1] and open <= close[1] and body > body[1]
+bearEngulf = i_use_engulf and isBear and isBull[1] and close <= open[1] and open >= close[1] and body > body[1]
+
+// ── 3.2 Hammer / Pin Bar / Shooting Star ────────────────────────────────────
+hammer     = i_use_pin and dnWick >= i_wick_mult * body and upWick <= body and body > 0
+shootStar  = i_use_pin and upWick >= i_wick_mult * body and dnWick <= body and body > 0
+
+// ── 3.3 Piercing Line / Dark Cloud Cover ────────────────────────────────────
+mid1       = (open[1] + close[1]) / 2
+piercing   = i_use_pierce and isBear[1] and isBull and open < close[1] and close > mid1 and close < open[1]
+darkCloud  = i_use_pierce and isBull[1] and isBear and open > close[1] and close < mid1 and close > open[1]
+
+// ── 3.4 Morning Star / Evening Star (3-candle) ──────────────────────────────
+mid2       = (open[2] + close[2]) / 2
+morningStar = i_use_star and isBear[2] and sigBody[2] and body[1] < body[2] * 0.5 and isBull and sigBody and close > mid2
+eveningStar = i_use_star and isBull[2] and sigBody[2] and body[1] < body[2] * 0.5 and isBear and sigBody and close < mid2
+
+// ── 3.5 Tweezer Top / Bottom ────────────────────────────────────────────────
+tweezerBot = i_use_tweezer and isBear[1] and isBull and math.abs(low  - low[1])  <= tol
+tweezerTop = i_use_tweezer and isBull[1] and isBear and math.abs(high - high[1]) <= tol
+
+// ── 3.6 Marubozu ─────────────────────────────────────────────────────────
+maruBull   = i_use_maru and isBull and body >= i_maru_pct * rng
+maruBear   = i_use_maru and isBear and body >= i_maru_pct * rng
+
+// ── 3.7 Aggregate bullish / bearish pattern ──────────────────────────────
+bullPattern = bullEngulf or hammer or piercing or morningStar or tweezerBot or maruBull
+bearPattern = bearEngulf or shootStar or darkCloud or eveningStar or tweezerTop or maruBear
+
+// ============================================================================
+// SECTION 4 · SIGNAL LOGIC  (candlestick only, non-repainting)
+// ============================================================================
+emaTrend  = ta.ema(close, i_trend_ema)
+trendUpOk = not i_use_trend or close > emaTrend
+trendDnOk = not i_use_trend or close < emaTrend
+
+// Raw decision on the (closed) pattern candle. Mutually exclusive so a bar
+// that somehow flags both directions is skipped rather than mislabelled.
+raw_buy  = bullPattern and not bearPattern and trendUpOk
+raw_sell = bearPattern and not bullPattern and trendDnOk
+
+// Timing: EARLY shows the prior candle's pattern at this candle's open;
+// CONFIRMED commits on close of the pattern candle. Both are non-repainting.
+buy_signal  = i_early ? raw_buy[1]  : (raw_buy  and barstate.isconfirmed)
+sell_signal = i_early ? raw_sell[1] : (raw_sell and barstate.isconfirmed)
+
+// ============================================================================
+// SECTION 5 · THE ONLY VISUAL OUTPUT  (BUY / SELL labels)
+// ============================================================================
+plotshape(buy_signal,
+          title     = "BUY Signal",
+          style     = shape.labelup,
+          location  = location.belowbar,
+          color     = color.new(#00e676, 0),
+          size      = size.small,
+          text      = "BUY",
+          textcolor = color.white)
+
+plotshape(sell_signal,
+          title     = "SELL Signal",
+          style     = shape.labeldown,
+          location  = location.abovebar,
+          color     = color.new(#ff1744, 0),
+          size      = size.small,
+          text      = "SELL",
+          textcolor = color.white)
+
+// ============================================================================
+// SECTION 6 · ALERTS  (exactly two)
+// ============================================================================
+alertcondition(buy_signal,
+               title   = "BUY Signal",
+               message = "QASEP BUY Signal | {{ticker}} @ {{close}}")
+
+alertcondition(sell_signal,
+               title   = "SELL Signal",
+               message = "QASEP SELL Signal | {{ticker}} @ {{close}}")
