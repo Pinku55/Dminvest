@@ -44,6 +44,11 @@ indicator(title      = "Quantum AI Smart Entry Pro",
 // SECTION 1 · INPUTS  (tuning only — nothing here adds chart drawings)
 // ============================================================================
 
+// ── Signal Mode ─────────────────────────────────────────────────────────────
+grpMode      = "Signal Mode"
+i_every_bar  = input.bool(true, "Every-Candle Mode (BUY or SELL on every bar)", group=grpMode, tooltip="ON  = mark every closed candle with a BUY or SELL arrow based on its directional bias.\nOFF = strict mode: only high-quality signals where all confirmations agree.")
+i_early      = input.bool(true, "Early Signals (show at candle OPEN, no delay)", group=grpMode, tooltip="ON  = the arrow appears at the OPEN of the current candle, predicting its direction from the just-closed candle. Enter the moment the candle opens. Non-repainting (uses only closed-bar data).\nOFF = arrow appears after the candle CLOSES (confirmation), which is one candle later.")
+
 // ── Trend / EMA ─────────────────────────────────────────────────────────────
 grpTrend   = "Trend Filter"
 i_ema_fast = input.int(21,  "Fast EMA Length", minval=1, group=grpTrend)
@@ -66,13 +71,13 @@ i_macd_sig  = input.int(9,  "MACD Signal", minval=1, group=grpMacd)
 // ── ADX / Trend Strength ────────────────────────────────────────────────────
 grpAdx     = "Trend Strength (ADX)"
 i_adx_len  = input.int(14,   "ADX Length",            minval=1, group=grpAdx)
-i_adx_min  = input.float(22, "ADX Minimum Threshold", minval=1, group=grpAdx)
+i_adx_min  = input.float(20, "ADX Minimum Threshold", minval=1, group=grpAdx)
 
 // ── Volume ──────────────────────────────────────────────────────────────────
 grpVol     = "Volume"
 i_use_vol  = input.bool(true, "Require Volume Confirmation",  group=grpVol)
 i_vol_len  = input.int(20,    "Volume Average Length", minval=1, group=grpVol)
-i_vol_mult = input.float(1.2, "Relative-Volume Threshold (x avg)", minval=0.1, step=0.1, group=grpVol)
+i_vol_mult = input.float(1.0, "Relative-Volume Threshold (x avg)", minval=0.1, step=0.1, group=grpVol)
 
 // ── Higher-Timeframe Confirmation ───────────────────────────────────────────
 grpHtf     = "Higher-Timeframe Confirmation"
@@ -113,6 +118,9 @@ rsi_bear = rsi_val < i_rsi_bear and rsi_val < rsi_val[1] and rsi_val > i_rsi_os
 [macd_line, macd_sig_line, macd_hist] = ta.macd(close, i_macd_fast, i_macd_slow, i_macd_sig)
 macd_bull = macd_line > macd_sig_line and macd_hist > 0
 macd_bear = macd_line < macd_sig_line and macd_hist < 0
+// Momentum-ignition crossovers (used as the discrete trigger event below).
+macd_cross_up = ta.crossover(macd_line, macd_sig_line)
+macd_cross_dn = ta.crossunder(macd_line, macd_sig_line)
 
 // ── 2.4 ATR / Volatility ───────────────────────────────────────────────────
 atr_val = ta.atr(i_atr_len)
@@ -170,25 +178,58 @@ htf_bull = not i_use_htf or (htf_c > htf_es and htf_ef > htf_es)
 htf_bear = not i_use_htf or (htf_c < htf_es and htf_ef < htf_es)
 
 // ============================================================================
-// SECTION 3 · STRICT SIGNAL LOGIC  (ALL confirmations must agree)
+// SECTION 3 · SIGNAL LOGIC
 // ----------------------------------------------------------------------------
-// A directional "state" is true only when every bullish/bearish filter aligns
-// and the market is not ranging. We then emit a discrete signal on the FIRST
-// confirmed bar that the alignment occurs (rising edge), so arrows are clean
-// one-shot events rather than a continuous run. Finally, barstate.isconfirmed
-// guarantees the signal is locked in only after the candle closes.
+// Two modes (selected by the "Every-Candle Mode" input):
+//   • EVERY-CANDLE (default): every closed bar gets exactly one BUY or SELL
+//     arrow based on its directional bias — ideal for taking a position on
+//     each candle in binary options.
+//   • STRICT: only high-quality signals where a full set of confirmations
+//     agree and a momentum trigger fires.
+// Both modes are NON-REPAINTING: the signal is locked in only on candle close
+// (barstate.isconfirmed) and uses closed-bar data, so an arrow can never
+// appear, move or disappear intrabar.
 // ============================================================================
 
-bull_state = trend_bull and rsi_bull and macd_bull and di_bull and adx_ok and vol_ok and candle_bull and htf_bull and not is_ranging
-bear_state = trend_bear and rsi_bear and macd_bear and di_bear and adx_ok and vol_ok and candle_bear and htf_bear and not is_ranging
+// 1 · Directional context (all confirmations must agree).
+bull_context = trend_bull and rsi_bull and macd_bull and di_bull and adx_ok and vol_ok and candle_bull and htf_bull and not is_ranging
+bear_context = trend_bear and rsi_bear and macd_bear and di_bear and adx_ok and vol_ok and candle_bear and htf_bear and not is_ranging
 
-// Rising edge: only the first bar of a fresh alignment qualifies.
-bull_edge = bull_state and not bull_state[1]
-bear_edge = bear_state and not bear_state[1]
+// 2 · Momentum-ignition trigger (the discrete entry event).
+bull_trigger = macd_cross_up or ta.crossover(rsi_val, i_rsi_bull)
+bear_trigger = macd_cross_dn or ta.crossunder(rsi_val, i_rsi_bear)
 
-// Final, non-repainting signals — committed strictly on candle close.
-buy_signal  = bull_edge and not bear_state and barstate.isconfirmed
-sell_signal = bear_edge and not bull_state and barstate.isconfirmed
+// 3 · STRICT-mode signals (only when context + trigger agree).
+strict_buy  = bull_context and bull_trigger and not bear_context
+strict_sell = bear_context and bear_trigger and not bull_context
+
+// ----------------------------------------------------------------------------
+// EVERY-CANDLE MODE
+//   Each closed candle is classified as BUY or SELL from a simple directional
+//   bias score (EMA trend, price vs EMA, RSI, MACD, candle body). The result is
+//   always one or the other, so every bar receives exactly one arrow. Ties fall
+//   back to the candle's own colour. Still uses closed-bar data only.
+// ----------------------------------------------------------------------------
+bias_score = (ema_fast > ema_slow ? 1 : -1) + (close > ema_fast ? 1 : -1) + (rsi_val > 50 ? 1 : -1) + (macd_line > macd_sig_line ? 1 : -1) + (close > open ? 1 : -1)
+bias_bull  = bias_score > 0 or (bias_score == 0 and close >= open)
+
+every_buy  = bias_bull
+every_sell = not bias_bull
+
+// ----------------------------------------------------------------------------
+// FINAL, NON-REPAINTING SIGNALS
+//   raw_*  = the mode's raw decision for a candle.
+//   EARLY (default): show the just-completed candle's decision at the OPEN of
+//     the current candle — i.e. predict the current candle's direction so you
+//     can enter with no delay. It depends only on closed-bar data (previous
+//     candle), so it is fixed the instant the candle opens and never repaints.
+//   CONFIRMED: show the decision after the candle CLOSES (one candle later).
+// ----------------------------------------------------------------------------
+raw_buy  = i_every_bar ? every_buy  : strict_buy
+raw_sell = i_every_bar ? every_sell : strict_sell
+
+buy_signal  = i_early ? raw_buy[1]  : (raw_buy  and barstate.isconfirmed)
+sell_signal = i_early ? raw_sell[1] : (raw_sell and barstate.isconfirmed)
 
 // ============================================================================
 // SECTION 4 · THE ONLY VISUAL OUTPUT  (BUY / SELL arrows)
@@ -202,18 +243,14 @@ plotshape(buy_signal,
           style    = shape.triangleup,
           location = location.belowbar,
           color    = color.new(#00e676, 0),
-          size     = size.small,
-          text     = "BUY",
-          textcolor = color.new(#00e676, 0))
+          size     = size.tiny)
 
 plotshape(sell_signal,
           title    = "SELL Signal",
           style    = shape.triangledown,
           location = location.abovebar,
           color    = color.new(#ff1744, 0),
-          size     = size.small,
-          text     = "SELL",
-          textcolor = color.new(#ff1744, 0))
+          size     = size.tiny)
 
 // ============================================================================
 // SECTION 5 · ALERTS  (exactly two — nothing else)
